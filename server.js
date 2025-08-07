@@ -14,7 +14,7 @@ app.use(express.json());
 const CHANNEL_HANDLE = '@MoonVlr5';
 const CHANNEL_URL = 'https://www.youtube.com/@MoonVlr5';
 const CACHE_DURATION = 2 * 60 * 1000; // 2 minutes
-const MONITOR_INTERVAL = 30 * 1000; // Check  seconds
+const MONITOR_INTERVAL = 28800; // Check 8 hrs interval
 const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL; // Add your webhook URL to .env file
 
 // Cache storage
@@ -874,6 +874,7 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+
 
 
 

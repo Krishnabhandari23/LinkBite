@@ -13,7 +13,10 @@ router.get('/health', (req, res) => {
     timestamp: new Date()
   });
 });
-
+//default page
+app.get('/', (req, res) => {
+  res.send('Welcome to the YouTube Shortener API!');
+});
 app.get('/api/live-link', async (req, res) => {
     try {
         // Get channel from query parameter or use default
@@ -37,5 +40,6 @@ router.post('/monitoring/:action', streamController.controlMonitoring);
 
 // Shortener routes
 router.post('/shorten', shortenerController.createShortLink);
+
 
 module.exports = router;

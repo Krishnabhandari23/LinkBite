@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Link Shortener</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --primary: #ff0000;
+            --primary-dark: #cc0000;
+            --dark: #282828;
+            --light: #f9f9f9;
+            --gray: #606060;
+            --light-gray: #e0e0e0;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Roboto', Arial, sans-serif;
+        }
+        
+        body {
+            background-color: var(--light);
+            color: var(--dark);
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        
+        h1 {
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+            font-size: 2.5rem;
+        }
+        
+        .subtitle {
+            color: var(--gray);
+            margin-bottom: 1.5rem;
+        }
+        
+        .logo {
+            font-size: 3rem;
+            color: var(--primary);
+            margin-bottom: 1rem;
+        }
+        
+        .input-section {
+            background: white;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+        }
+        
+        .input-group {
+            display: flex;
+            margin-bottom: 1rem;
+        }
+        
+        input {
+            flex: 1;
+            padding: 0.75rem 1rem;
+            border: 1px solid var(--light-gray);
+            border-radius: 4px 0 0 4px;
+            font-size: 1rem;
+            outline: none;
+            transition: border 0.3s;
+        }
+        
+        input:focus {
+            border-color: var(--primary);
+        }
+        
+        button {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0 4px 4px 0;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 500;
+            transition: background 0.3s;
+        }
+        
+        button:hover {
+            background-color: var(--primary-dark);
+        }
+        
+        button:disabled {
+            background-color: var(--gray);
+            cursor: not-allowed;
+        }
+        
+        .result-section {
+            background: white;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            display: none;
+        }
+        
+        .result-title {
+            margin-bottom: 1rem;
+            color: var(--dark);
+        }
+        
+        .result-box {
+            display: flex;
+            align-items: center;
+            background: var(--light);
+            padding: 0.75rem 1rem;
+            border-radius: 4px;
+            margin-bottom: 1rem;
+        }
+        
+        .result-url {
+            flex: 1;
+            word-break: break-all;
+            padding-right: 1rem;
+        }
+        
+        .copy-btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .copy-btn:hover {
+            background: var(--primary-dark);
+        }
+        
+        .video-info {
+            margin-top: 1.5rem;
+        }
+        
+        .video-title {
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+        }
+        
+        .thumbnail-container {
+            margin-top: 1rem;
+        }
+        
+        .thumbnail {
+            max-width: 100%;
+            border-radius: 4px;
+        }
+        
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .live-badge {
+            background: var(--primary);
+            color: white;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+        
+        .error {
+            color: #d32f2f;
+            background: #ffebee;
+            padding: 1rem;
+            border-radius: 4px;
+            margin-top: 1rem;
+            display: none;
+        }
+        
+        .loading {
+            display: none;
+            text-align: center;
+            margin: 1rem 0;
+        }
+        
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-radius: 50%;
+            border-top: 4px solid var(--primary);
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        footer {
+            text-align: center;
+            margin-top: 3rem;
+            color: var(--gray);
+            font-size: 0.9rem;
+        }
+        
+        @media (max-width: 600px) {
+            .container {
+                padding: 1rem;
+            }
+            
+            .input-group {
+                flex-direction: column;
+            }
+            
+            input {
+                border-radius: 4px;
+                margin-bottom: 0.5rem;
+            }
+            
+            button {
+                border-radius: 4px;
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <i class="fab fa-youtube"></i>
+            </div>
+            <h1>YouTube Link Shortener</h1>
+            <p class="subtitle">Get shortened links for YouTube videos, live streams, and shorts</p>
+        </header>
+        
+        <div class="input-section">
+            <div class="input-group">
+                <input type="text" id="channel-input" placeholder="Enter YouTube channel handle or URL (e.g. @AaGVLR or https://youtube.com/@AaGVLR)">
+                <button id="shorten-btn">Shorten</button>
+            </div>
+            <p>Enter a YouTube channel handle (like @AaGVLR) or full channel URL to check for live streams and get a shortened link.</p>
+        </div>
+        
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>Checking for live streams...</p>
+        </div>
+        
+        <div class="error" id="error"></div>
+        
+        <div class="result-section" id="result-section">
+            <h3 class="result-title">Shortened Link</h3>
+            <div class="result-box">
+                <div class="result-url" id="short-url"></div>
+                <button class="copy-btn" id="copy-btn">
+                    <i class="fas fa-copy"></i> Copy
+                </button>
+            </div>
+            
+            <div class="status" id="status-container">
+                <!-- Status will be inserted here -->
+            </div>
+            
+            <div class="video-info" id="video-info">
+                <h4 class="video-title" id="video-title"></h4>
+                <div class="thumbnail-container" id="thumbnail-container"></div>
+            </div>
+        </div>
+        
+        <footer>
+            <p>© 2023 YouTube Link Shortener | All YouTube content is property of their respective owners</p>
+        </footer>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const channelInput = document.getElementById('channel-input');
+            const shortenBtn = document.getElementById('shorten-btn');
+            const resultSection = document.getElementById('result-section');
+            const shortUrl = document.getElementById('short-url');
+            const copyBtn = document.getElementById('copy-btn');
+            const loading = document.getElementById('loading');
+            const error = document.getElementById('error');
+            const statusContainer = document.getElementById('status-container');
+            const videoTitle = document.getElementById('video-title');
+            const thumbnailContainer = document.getElementById('thumbnail-container');
+            
+            // Handle form submission
+            shortenBtn.addEventListener('click', shortenLink);
+            channelInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    shortenLink();
+                }
+            });
+            
+            // Copy button functionality
+            copyBtn.addEventListener('click', function() {
+                navigator.clipboard.writeText(shortUrl.textContent)
+                    .then(() => {
+                        const originalText = copyBtn.innerHTML;
+                        copyBtn.innerHTML = '<i class="fas fa-check"></i> Copied!';
+                        setTimeout(() => {
+                            copyBtn.innerHTML = originalText;
+                        }, 2000);
+                    })
+                    .catch(err => {
+                        console.error('Failed to copy: ', err);
+                    });
+            });
+            
+            function shortenLink() {
+                const input = channelInput.value.trim();
+                
+                if (!input) {
+                    showError('Please enter a YouTube channel handle or URL');
+                    return;
+                }
+                
+                // Extract channel handle from URL if provided
+                let channelHandle = input;
+                try {
+                    const url = new URL(input.startsWith('http') ? input : `https://${input}`);
+                    if (url.hostname.includes('youtube.com') || url.hostname.includes('youtube')) {
+                        const pathParts = url.pathname.split('/').filter(part => part);
+                        if (pathParts.length > 0) {
+                            channelHandle = pathParts[0];
+                        }
+                    }
+                } catch (e) {
+                    // Not a valid URL, assume it's a handle
+                }
+                
+                // Show loading state
+                loading.style.display = 'block';
+                resultSection.style.display = 'none';
+                error.style.display = 'none';
+                shortenBtn.disabled = true;
+                
+                // Call the API
+                fetch(`http://localhost:3000/api/live-link?channel=${encodeURIComponent(channelHandle)}`)
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error('Network response was not ok');
+                        }
+                        return response.json();
+                    })
+                    .then(data => {
+                        loading.style.display = 'none';
+                        shortenBtn.disabled = false;
+                        
+                        if (data.success) {
+                            displayResults(data);
+                        } else {
+                            showError(data.error || 'Failed to shorten link');
+                        }
+                    })
+                    .catch(err => {
+                        loading.style.display = 'none';
+                        shortenBtn.disabled = false;
+                        showError(err.message || 'Failed to connect to server');
+                    });
+            }
+            
+            function displayResults(data) {
+                // Clear previous results
+                statusContainer.innerHTML = '';
+                videoTitle.textContent = '';
+                thumbnailContainer.innerHTML = '';
+                
+                // Set the shortened URL
+                if (data.isLive && data.shortUrl) {
+                    shortUrl.textContent = data.shortUrl;
+                    
+                    // Create status elements
+                    const statusHTML = `
+                        <span class="live-badge">LIVE</span>
+                        <span>${data.channel} is currently live!</span>
+                    `;
+                    statusContainer.innerHTML = statusHTML;
+                    
+                    // Set video info if available
+                    if (data.title) {
+                        videoTitle.textContent = data.title;
+                    }
+                    
+                    // Set thumbnail if available
+                    if (data.thumbnail) {
+                        thumbnailContainer.innerHTML = `
+                            <img src="${data.thumbnail}" alt="Video thumbnail" class="thumbnail">
+                        `;
+                    }
+                    
+                    resultSection.style.display = 'block';
+                } else {
+                    shortUrl.textContent = `https://youtube.com/${data.channel}`;
+                    
+                    const statusHTML = `
+                        <span>${data.channel} is not currently live. Here's their channel link:</span>
+                    `;
+                    statusContainer.innerHTML = statusHTML;
+                    
+                    resultSection.style.display = 'block';
+                }
+            }
+            
+            function showError(message) {
+                error.textContent = message;
+                error.style.display = 'block';
+            }
+        });
+    </script>
+</body>
+</html>

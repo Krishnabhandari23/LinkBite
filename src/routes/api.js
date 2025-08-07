@@ -15,7 +15,7 @@ router.get('/health', (req, res) => {
 });
 //default page
 app.get('/', (req, res) => {
-  res.send('Welcome to the YouTube Shortener API!');
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 app.get('/api/live-link', async (req, res) => {
     try {
@@ -43,3 +43,4 @@ router.post('/shorten', shortenerController.createShortLink);
 
 
 module.exports = router;
+

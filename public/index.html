@@ -294,7 +294,7 @@
             const channelInput = document.getElementById('channel-input');
             const shortenBtn = document.getElementById('shorten-btn');
             const resultSection = document.getElementById('result-section');
-            const shortUrl = document.getElementById('short-url');
+            const shorturl = document.getElementById('short-url');
             const copyBtn = document.getElementById('copy-btn');
             const loading = document.getElementById('loading');
             const error = document.getElementById('error');
@@ -312,7 +312,7 @@
             
             // Copy button functionality
             copyBtn.addEventListener('click', function() {
-                navigator.clipboard.writeText(shortUrl.textContent)
+                navigator.clipboard.writeText(shorturl.textContent)
                     .then(() => {
                         const originalText = copyBtn.innerHTML;
                         copyBtn.innerHTML = '<i class="fas fa-check"></i> Copied!';
@@ -385,8 +385,8 @@
                 thumbnailContainer.innerHTML = '';
                 
                 // Set the shortened URL
-                if (data.isLive && data.shortUrl) {
-                    shortUrl.textContent = data.shortUrl;
+                if (data.isLive && data.shorturl) {
+                    shorturl.textContent = data.shorturl;
                     
                     // Create status elements
                     const statusHTML = `
@@ -409,7 +409,7 @@
                     
                     resultSection.style.display = 'block';
                 } else {
-                    shortUrl.textContent = `https://youtube.com/${data.channel}`;
+                    shorturl.textContent = `https://youtube.com/${data.channel}`;
                     
                     const statusHTML = `
                         <span>${data.channel} is not currently live. Here's their channel link:</span>
@@ -429,3 +429,4 @@
 </body>
 
 </html>
+

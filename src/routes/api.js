@@ -1,7 +1,7 @@
 const express = require('express');
 const streamController = require('../controllers/streamController');
 const shortenerController = require('../controllers/shortenerController');
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 const router = express.Router();
 
 // Health check
@@ -43,4 +43,5 @@ router.post('/shorten', shortenerController.createShortLink);
 
 
 module.exports = router;
+
 

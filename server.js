@@ -22,7 +22,7 @@ const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL; // Add your webhook URL to 
 
 // Cache storage
 let cachedLiveData = {
-    shortUrl: null,
+    shorturl: null,
     lastChecked: null,
     isLive: false,
     liveUrl: null,
@@ -262,25 +262,25 @@ async function shortenUrl(longUrl) {
                 // 🔍 Debug: Show full raw response
                 console.log(`📥 Raw response from ${shortener.name}:`, response.data);
 
-                let shortUrl = null;
+                let shorturl = null;
 
                 if (typeof response.data === 'string') {
-                    shortUrl = response.data.trim();
+                    shorturl = response.data.trim();
                 } else if (response.data) {
-                    const fields = ['short_url', 'shortUrl', 'shortened_url', 'url', 'link', 'short','shorturl'];
+                    const fields = ['short_url', 'shorturl', 'shortened_url', 'url', 'link', 'short','shorturl'];
                     for (const field of fields) {
                         if (response.data[field]) {
-                            shortUrl = response.data[field];
+                            shorturl = response.data[field];
                             break;
                         }
                     }
                 }
 
-                if (shortUrl && shortUrl.startsWith('http') && shortUrl !== longUrl) {
-                    console.log(`✅ Successfully shortened with ${shortener.name}: ${shortUrl}`);
+                if (shorturl && shorturl.startsWith('http') && shorturl !== longUrl) {
+                    console.log(`✅ Successfully shortened with ${shortener.name}: ${shorturl}`);
                     return {
                         success: true,
-                        shortUrl,
+                        shorturl,
                         originalUrl: longUrl,
                         service: shortener.name
                     };
@@ -307,7 +307,7 @@ async function shortenUrl(longUrl) {
     console.warn('⚠️  All URL shortening services failed, returning original URL');
     return {
         success: false,
-        shortUrl: longUrl,
+        shorturl: longUrl,
         originalUrl: longUrl,
         service: 'none',
         error: 'All shortening services failed'
@@ -327,8 +327,8 @@ function formatDiscordMessage(data) {
                 embeds: [{
                     ...baseEmbed,
                     title: `🔴 ${data.title || 'Live Now!'}`,
-                    description: `${CHANNEL_HANDLE} is now live on YouTube!\n\n[Watch Here](${data.shortUrl})`,
-                    url: data.shortUrl,
+                    description: `${CHANNEL_HANDLE} is now live on YouTube!\n\n[Watch Here](${data.shorturl})`,
+                    url: data.shorturl,
                     color: 0xFF0000, // Red
                     thumbnail: {
                         url: data.thumbnail || 'https://i.imgur.com/4M34hi2.png'
@@ -341,7 +341,7 @@ function formatDiscordMessage(data) {
                         },
                         {
                             name: "Short Link",
-                            value: `[${data.shortUrl.replace(/^https?:\/\//, '')}](${data.shortUrl})`,
+                            value: `[${data.shorturl.replace(/^https?:\/\//, '')}](${data.shorturl})`,
                             inline: true
                         }
                     ]
@@ -410,7 +410,7 @@ async function sendWebhookNotification(data) {
         if (data.event === 'stream_started') {
             payload = formatDiscordMessage({
                 ...data,
-                shortUrl: data.shortUrl,
+                shorturl: data.shorturl,
                 title: data.title,
                 thumbnail: data.thumbnail
             });
@@ -465,7 +465,7 @@ async function monitorLiveStatus() {
                 // Update cache
                 const now = Date.now();
                 cachedLiveData = {
-                    shortUrl: shortenerResult.shortUrl,
+                    shorturl: shortenerResult.shorturl,
                     lastChecked: now,
                     isLive: true,
                     liveUrl: liveStatus.liveUrl,
@@ -476,7 +476,7 @@ async function monitorLiveStatus() {
                 await sendWebhookNotification({
                     event: 'stream_started',
                     isLive: true,
-                    shortUrl: shortenerResult.shortUrl,
+                    shorturl: shortenerResult.shorturl,
                     originalUrl: liveStatus.liveUrl,
                     title: liveStatus.title,
                     shortenerService: shortenerResult.service,
@@ -484,7 +484,7 @@ async function monitorLiveStatus() {
                     thumbnail: liveStatus.thumbnail
                 });
 
-                console.log(`✅ Live stream notification sent: ${shortenerResult.shortUrl}`);
+                console.log(`✅ Live stream notification sent: ${shortenerResult.shorturl}`);
                 
             } else if (!liveStatus.isLive && monitoringState.lastKnownLiveStatus) {
                 // Channel went OFFLINE
@@ -492,7 +492,7 @@ async function monitorLiveStatus() {
                 
                 // Update cache
                 cachedLiveData = {
-                    shortUrl: null,
+                    shorturl: null,
                     lastChecked: Date.now(),
                     isLive: false,
                     liveUrl: null,
@@ -587,7 +587,7 @@ app.get('/api/live-link', async (req, res) => {
                 success: true,
                 cached: true,
                 isLive: cachedLiveData.isLive,
-                shortUrl: cachedLiveData.shortUrl,
+                shorturl: cachedLiveData.shorturl,
                 originalUrl: cachedLiveData.liveUrl,
                 title: cachedLiveData.title,
                 channel: CHANNEL_HANDLE,
@@ -607,7 +607,7 @@ app.get('/api/live-link', async (req, res) => {
             
             // Update cache
             cachedLiveData = {
-                shortUrl: shortenerResult.shortUrl,
+                shorturl: shortenerResult.shorturl,
                 lastChecked: now,
                 isLive: true,
                 liveUrl: liveStatus.liveUrl,
@@ -617,7 +617,7 @@ app.get('/api/live-link', async (req, res) => {
             res.json({
                 success: true,
                 isLive: true,
-                shortUrl: shortenerResult.shortUrl,
+                shorturl: shortenerResult.shorturl,
                 originalUrl: liveStatus.liveUrl,
                 title: liveStatus.title,
                 channel: CHANNEL_HANDLE,
@@ -631,7 +631,7 @@ app.get('/api/live-link', async (req, res) => {
             
             // Update cache
             cachedLiveData = {
-                shortUrl: null,
+                shorturl: null,
                 lastChecked: now,
                 isLive: false,
                 liveUrl: null,
@@ -812,7 +812,7 @@ app.post('/api/refresh', async (req, res) => {
         
         // Clear cache
         cachedLiveData = {
-            shortUrl: null,
+            shorturl: null,
             lastChecked: null,
             isLive: false,
             liveUrl: null,
@@ -826,7 +826,7 @@ app.post('/api/refresh', async (req, res) => {
             const shortenerResult = await shortenUrl(liveStatus.liveUrl);
             
             cachedLiveData = {
-                shortUrl: shortenerResult.shortUrl,
+                shorturl: shortenerResult.shorturl,
                 lastChecked: Date.now(),
                 isLive: true,
                 liveUrl: liveStatus.liveUrl,
@@ -837,7 +837,7 @@ app.post('/api/refresh', async (req, res) => {
                 success: true,
                 message: 'Cache refreshed - Channel is LIVE!',
                 isLive: true,
-                shortUrl: shortenerResult.shortUrl,
+                shorturl: shortenerResult.shorturl,
                 originalUrl: liveStatus.liveUrl,
                 title: liveStatus.title
             });
@@ -893,6 +893,7 @@ app.listen(PORT, () => {
 
 
 module.exports = app;
+
 
 
 

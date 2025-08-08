@@ -2,14 +2,17 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 require('dotenv').config();
-
+const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
-
+app.use(express.static(path.join(__dirname, 'public')));
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 // Configuration
 const CHANNEL_HANDLE = '@MoonVlr5';
 const CHANNEL_URL = 'https://www.youtube.com/@MoonVlr5';
@@ -874,6 +877,7 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+
 
 
 

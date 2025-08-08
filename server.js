@@ -205,8 +205,8 @@ async function shortenUrl(longUrl) {
                     headers: {
                         'Content-Type': 'application/json',
                         // Try with or without Bearer depending on docs
-                        'Authorization': process.env.Linktw_API_KEY 
-                        // 'Authorization': `Bearer ${process.env.Linktw_API_KEY}` // if required
+                        // 'Authorization': process.env.Linktw_API_KEY 
+                        'Authorization': `Bearer ${process.env.Linktw_API_KEY}` // if required
                     }
                 }
             ]
@@ -893,5 +893,6 @@ app.listen(PORT, () => {
 
 
 module.exports = app;
+
 
 

@@ -354,7 +354,7 @@
                 shortenBtn.disabled = true;
                 
                 // Call the API
-                fetch(`http://localhost:3000/api/live-link?channel=${encodeURIComponent(channelHandle)}`)
+                fetch(`https://yt-shortener-production.up.railway.app/api/live-link?channel=${encodeURIComponent(channelHandle)}`)
                     .then(response => {
                         if (!response.ok) {
                             throw new Error('Network response was not ok');
@@ -427,4 +427,5 @@
         });
     </script>
 </body>
+
 </html>

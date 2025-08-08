@@ -17,7 +17,7 @@ app.get('/', (req, res) => {
 const CHANNEL_HANDLE = '@hailhydragaming';
 const CHANNEL_URL = 'https://www.youtube.com/@hailhydragaming';
 const CACHE_DURATION = 2 * 60 * 1000; // 2 minutes
-const MONITOR_INTERVAL = 28800; // Check 8 hrs interval
+const MONITOR_INTERVAL = 60 * 60 *1000; // Check  seconds
 const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL; // Add your webhook URL to .env file
 
 // Cache storage
@@ -35,9 +35,9 @@ let monitoringState = {
     intervalId: null,
     lastKnownLiveStatus: false,
     consecutiveErrors: 0,
-    maxConsecutiveErrors: 9999999999
+    maxConsecutiveErrors: 5
 };
-
+startMonitoring();
 // Function to get channel ID from handle
 async function getChannelIdFromHandle(handle) {
     try {
@@ -189,27 +189,25 @@ async function checkLiveStatusFallback() {
 }
 
 // Function to shorten URL using multiple services
+
+
 async function shortenUrl(longUrl) {
     console.log(`🔗 Attempting to shorten URL: ${longUrl}`);
-    
+
     const shorteners = [
         {
             name: 'linktw.in',
             methods: [
                 {
-                    url: 'https://linktw.in/api/url',
+                    url: 'https://linktw.in/api/url/add',
                     method: 'POST',
                     data: { url: longUrl },
-                    headers: { 'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${process.env.LINKTW_API_KEY}` || ''  
-                        
+                    headers: {
+                        'Content-Type': 'application/json',
+                        // Try with or without Bearer depending on docs
+                        'Authorization': process.env.Linktw_API_KEY 
+                        // 'Authorization': `Bearer ${process.env.Linktw_API_KEY}` // if required
                     }
-                },
-                {
-                    url: 'https://linktw.in/api/shorten',
-                    method: 'POST', 
-                    data: { url: longUrl },
-                    headers: { 'Content-Type': 'application/json' }
                 }
             ]
         },
@@ -239,7 +237,7 @@ async function shortenUrl(longUrl) {
         for (const config of shortener.methods) {
             try {
                 console.log(`🔄 Trying ${shortener.name}...`);
-                
+
                 const axiosConfig = {
                     method: config.method,
                     url: config.url,
@@ -250,18 +248,25 @@ async function shortenUrl(longUrl) {
                     }
                 };
 
-                if (config.data) {
-                    axiosConfig.data = config.data;
+                if (config.data) axiosConfig.data = config.data;
+
+                // 🔍 Debug: Show exactly what we're sending
+                if (shortener.name === 'linktw.in') {
+                    console.log("📤 Sending to Linktw.in:");
+                    console.log("Headers:", axiosConfig.headers);
+                    console.log("Data:", axiosConfig.data);
                 }
 
                 const response = await axios(axiosConfig);
+
+                // 🔍 Debug: Show full raw response
+                console.log(`📥 Raw response from ${shortener.name}:`, response.data);
+
                 let shortUrl = null;
 
-                // Handle different response formats
                 if (typeof response.data === 'string') {
                     shortUrl = response.data.trim();
                 } else if (response.data) {
-                    // Try common field names
                     const fields = ['short_url', 'shortUrl', 'shortened_url', 'url', 'link', 'short','shorturl'];
                     for (const field of fields) {
                         if (response.data[field]) {
@@ -271,23 +276,32 @@ async function shortenUrl(longUrl) {
                     }
                 }
 
-                // Validate URL
                 if (shortUrl && shortUrl.startsWith('http') && shortUrl !== longUrl) {
                     console.log(`✅ Successfully shortened with ${shortener.name}: ${shortUrl}`);
                     return {
                         success: true,
-                        shortUrl: shortUrl,
+                        shortUrl,
                         originalUrl: longUrl,
                         service: shortener.name
                     };
                 }
-                
+
             } catch (error) {
-                console.log(`❌ ${shortener.name} failed: ${error.message}`);
+                console.log(`❌ ${shortener.name} failed:`);
+                if (error.response) {
+                    console.log("Status:", error.response.status);
+                    console.log("Response body:", error.response.data);
+                } else {
+                    console.log("Error:", error.message);
+                }
                 continue;
             }
         }
     }
+
+    return { success: false, error: 'All shorteners failed' };
+
+
 
     // All shorteners failed, return original URL
     console.warn('⚠️  All URL shortening services failed, returning original URL');
@@ -873,14 +887,11 @@ app.listen(PORT, () => {
     console.log('─'.repeat(60));
     console.log('Ready to monitor live streams! 🎬');
     console.log('💡 To start monitoring: POST /api/monitoring/start');
-    startMonitoring();
+    
 });
 
+
+
 module.exports = app;
-
-
-
-
-
 
 

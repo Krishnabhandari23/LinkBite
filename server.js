@@ -262,7 +262,7 @@ async function shortenUrl(longUrl) {
                     shortUrl = response.data.trim();
                 } else if (response.data) {
                     // Try common field names
-                    const fields = ['short_url', 'shortUrl', 'shortened_url', 'url', 'link', 'short'];
+                    const fields = ['short_url', 'shortUrl', 'shortened_url', 'url', 'link', 'short','shorturl'];
                     for (const field of fields) {
                         if (response.data[field]) {
                             shortUrl = response.data[field];
@@ -877,6 +877,7 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+
 
 
 

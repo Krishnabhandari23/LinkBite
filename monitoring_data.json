@@ -1,0 +1,18 @@
+{
+  "@moonvlr5": {
+    "channelHandle": "@moonvlr5",
+    "webhookUrl": "https://discord.com/api/webhooks/1402984120510054441/xpyxy1g6vtXBs4qVhnmKWdLEajhC2lxLHQhfGG1f0n4vehhWWbRIT-R6Xk8T6lYiXn-e",
+    "interval": 1800000,
+    "contentTypes": [
+      "live",
+      "videos",
+      "shorts"
+    ],
+    "lastKnownStates": {
+      "live": false,
+      "latestVideoId": "RIeDPPL_K-I",
+      "latestShortId": "iz3DMCJSfdg"
+    },
+    "savedAt": 1754740142201
+  }
+}

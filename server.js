@@ -10,39 +10,284 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, 'public', 'dynamic-youtube-server.html'));
 });
-// Configuration
-const CHANNEL_HANDLE = '@MoonVlr5';
-const CHANNEL_URL = 'https://www.youtube.com/@MoonVlr5';
+
+// Configuration constants
 const CACHE_DURATION = 2 * 60 * 1000; // 2 minutes
-const MONITOR_INTERVAL = 60 * 60 *1000; // Check  seconds
-const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL; // Add your webhook URL to .env file
+const DEFAULT_MONITOR_INTERVAL = 60 * 1000; // 1 minute default
 
-// Cache storage
-let cachedLiveData = {
-    shorturl: null,
-    lastChecked: null,
-    isLive: false,
-    liveUrl: null,
-    title: null
-};
+// Dynamic monitoring state - supports multiple channels
+let monitoringInstances = new Map(); // channelHandle -> monitoring instance
+let globalCache = new Map(); // channelHandle -> cached data
 
-// Monitoring state
-let monitoringState = {
-    isMonitoring: false,
-    intervalId: null,
-    lastKnownLiveStatus: false,
-    consecutiveErrors: 0,
-    maxConsecutiveErrors: 5
-};
-startMonitoring();
+// Monitoring instance structure
+class MonitoringInstance {
+    constructor(channelHandle, webhookUrl, interval = DEFAULT_MONITOR_INTERVAL, contentTypes = ['live']) {
+        this.channelHandle = channelHandle;
+        this.channelUrl = `https://www.youtube.com/${channelHandle}`;
+        this.webhookUrl = webhookUrl;
+        this.interval = interval;
+        this.contentTypes = contentTypes; // ['live', 'videos', 'shorts']
+        this.isMonitoring = false;
+        this.intervalId = null;
+        this.lastKnownStates = {
+            live: false,
+            latestVideoId: null,
+            latestShortId: null
+        };
+        this.consecutiveErrors = 0;
+        this.maxConsecutiveErrors = 5;
+        this.lastChecked = null;
+    }
+
+    async start() {
+        if (this.isMonitoring) {
+            return { success: false, message: 'Already monitoring this channel' };
+        }
+
+        console.log(`🚀 Starting monitoring for ${this.channelHandle} (${this.contentTypes.join(', ')})`);
+        this.isMonitoring = true;
+        this.consecutiveErrors = 0;
+        
+        // Start monitoring immediately
+        await this.checkContent();
+        
+        // Set up interval
+        this.intervalId = setInterval(() => this.checkContent(), this.interval);
+        
+        return { success: true, message: 'Monitoring started successfully' };
+    }
+
+    stop() {
+        if (!this.isMonitoring) {
+            return { success: false, message: 'Not currently monitoring' };
+        }
+
+        console.log(`🛑 Stopping monitoring for ${this.channelHandle}`);
+        
+        if (this.intervalId) {
+            clearInterval(this.intervalId);
+            this.intervalId = null;
+        }
+        
+        this.isMonitoring = false;
+        this.consecutiveErrors = 0;
+        
+        return { success: true, message: 'Monitoring stopped successfully' };
+    }
+
+    async checkContent() {
+        try {
+            console.log(`🔍 Checking content for ${this.channelHandle}...`);
+            
+            for (const contentType of this.contentTypes) {
+                await this.checkContentType(contentType);
+            }
+            
+            // Reset consecutive errors on successful check
+            this.consecutiveErrors = 0;
+            this.lastChecked = Date.now();
+
+        } catch (error) {
+            console.error(`❌ Monitoring error for ${this.channelHandle}:`, error.message);
+            this.consecutiveErrors++;
+            
+            // Stop monitoring if too many consecutive errors
+            if (this.consecutiveErrors >= this.maxConsecutiveErrors) {
+                console.error(`❌ Too many consecutive errors for ${this.channelHandle}, stopping monitoring`);
+                this.stop();
+                
+                // Send error webhook
+                await this.sendWebhookNotification({
+                    event: 'monitoring_error',
+                    error: 'Monitoring stopped due to consecutive errors',
+                    consecutiveErrors: this.consecutiveErrors
+                });
+                
+                // Remove from monitoring instances
+                monitoringInstances.delete(this.channelHandle);
+            }
+        }
+    }
+
+    async checkContentType(contentType) {
+        let result;
+        
+        switch (contentType) {
+            case 'live':
+                result = await checkIfChannelIsLive(this.channelHandle);
+                await this.handleLiveStatusChange(result);
+                break;
+            case 'videos':
+                result = await getLatestVideos(this.channelHandle, 1);
+                await this.handleNewVideo(result);
+                break;
+            case 'shorts':
+                result = await getLatestShorts(this.channelHandle, 1);
+                await this.handleNewShort(result);
+                break;
+        }
+    }
+
+    async handleLiveStatusChange(liveStatus) {
+        if (liveStatus.isLive !== this.lastKnownStates.live) {
+            console.log(`🔄 Live status changed for ${this.channelHandle}: ${this.lastKnownStates.live} → ${liveStatus.isLive}`);
+            
+            if (liveStatus.isLive && liveStatus.liveUrl) {
+                // Channel went LIVE
+                console.log(`🎉 ${this.channelHandle} just went LIVE!`);
+                
+                const shortenerResult = await shortenUrl(liveStatus.liveUrl);
+                
+                // Update cache
+                globalCache.set(this.channelHandle, {
+                    ...globalCache.get(this.channelHandle) || {},
+                    shorturl: shortenerResult.shorturl,
+                    lastChecked: Date.now(),
+                    isLive: true,
+                    liveUrl: liveStatus.liveUrl,
+                    title: liveStatus.title,
+                    thumbnail: liveStatus.thumbnail
+                });
+
+                // Send webhook notification
+                await this.sendWebhookNotification({
+                    event: 'stream_started',
+                    isLive: true,
+                    shorturl: shortenerResult.shorturl,
+                    originalUrl: liveStatus.liveUrl,
+                    title: liveStatus.title,
+                    shortenerService: shortenerResult.service,
+                    method: liveStatus.method,
+                    thumbnail: liveStatus.thumbnail
+                });
+
+            } else if (!liveStatus.isLive && this.lastKnownStates.live) {
+                // Channel went OFFLINE
+                console.log(`📺 ${this.channelHandle} went offline`);
+                
+                // Send webhook notification
+                await this.sendWebhookNotification({
+                    event: 'stream_ended',
+                    isLive: false,
+                    message: 'Stream has ended'
+                });
+            }
+            
+            this.lastKnownStates.live = liveStatus.isLive;
+        }
+    }
+
+    async handleNewVideo(videoResult) {
+        if (videoResult.success && videoResult.videos.length > 0) {
+            const latestVideo = videoResult.videos[0];
+            
+            if (this.lastKnownStates.latestVideoId !== latestVideo.videoId) {
+                console.log(`📹 New video detected for ${this.channelHandle}: ${latestVideo.title}`);
+                
+                const shortenerResult = await shortenUrl(latestVideo.url);
+                
+                // Send webhook notification
+                await this.sendWebhookNotification({
+                    event: 'new_video',
+                    title: latestVideo.title,
+                    shorturl: shortenerResult.shorturl,
+                    originalUrl: latestVideo.url,
+                    thumbnail: latestVideo.thumbnail,
+                    publishedAt: latestVideo.publishedAt,
+                    viewCount: latestVideo.viewCount
+                });
+                
+                this.lastKnownStates.latestVideoId = latestVideo.videoId;
+            }
+        }
+    }
+
+    async handleNewShort(shortResult) {
+        if (shortResult.success && shortResult.shorts.length > 0) {
+            const latestShort = shortResult.shorts[0];
+            
+            if (this.lastKnownStates.latestShortId !== latestShort.videoId) {
+                console.log(`🎬 New short detected for ${this.channelHandle}: ${latestShort.title}`);
+                
+                const shortenerResult = await shortenUrl(latestShort.url);
+                
+                // Send webhook notification
+                await this.sendWebhookNotification({
+                    event: 'new_short',
+                    title: latestShort.title,
+                    shorturl: shortenerResult.shorturl,
+                    originalUrl: latestShort.url,
+                    thumbnail: latestShort.thumbnail,
+                    publishedAt: latestShort.publishedAt,
+                    viewCount: latestShort.viewCount
+                });
+                
+                this.lastKnownStates.latestShortId = latestShort.videoId;
+            }
+        }
+    }
+
+    async sendWebhookNotification(data) {
+        if (!this.webhookUrl) {
+            console.log(`⚠️  No webhook URL configured for ${this.channelHandle}, skipping notification`);
+            return false;
+        }
+
+        try {
+            console.log(`📤 Sending webhook notification for ${this.channelHandle}...`);
+
+            let payload = formatDiscordMessage({
+                ...data,
+                channelHandle: this.channelHandle,
+                channelUrl: this.channelUrl
+            });
+
+            const response = await axios.post(this.webhookUrl, payload, {
+                timeout: 10000,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'YouTube-Live-Monitor-Pro/2.0'
+                }
+            });
+
+            if (response.status >= 200 && response.status < 300) {
+                console.log(`✅ Webhook notification sent successfully for ${this.channelHandle}`);
+                return true;
+            } else {
+                console.error(`❌ Webhook failed for ${this.channelHandle} with status:`, response.status);
+                return false;
+            }
+        } catch (error) {
+            console.error(`❌ Webhook notification failed for ${this.channelHandle}:`, error.response?.data || error.message);
+            return false;
+        }
+    }
+
+    getStatus() {
+        return {
+            channelHandle: this.channelHandle,
+            channelUrl: this.channelUrl,
+            webhookUrl: this.webhookUrl ? this.webhookUrl.replace(/\/[^\/]*$/, '/***') : null,
+            isMonitoring: this.isMonitoring,
+            contentTypes: this.contentTypes,
+            lastKnownStates: this.lastKnownStates,
+            consecutiveErrors: this.consecutiveErrors,
+            interval: this.interval,
+            lastChecked: this.lastChecked ? new Date(this.lastChecked).toISOString() : null,
+            lastKnownLiveStatus: this.lastKnownStates.live // Fixed property name
+        };
+    }
+}
+
 // Function to get channel ID from handle
 async function getChannelIdFromHandle(handle) {
     try {
-        const cleanHandle = handle.replace('@', '');
-        const response = await axios.get(`https://www.youtube.com/${handle}`, {
+        const cleanHandle = handle.startsWith('@') ? handle : `@${handle}`;
+        const response = await axios.get(`https://www.youtube.com/${cleanHandle}`, {
             timeout: 10000,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -62,28 +307,28 @@ async function getChannelIdFromHandle(handle) {
         for (const pattern of patterns) {
             const match = html.match(pattern);
             if (match) {
-                console.log(`✅ Found channel ID: ${match[1]}`);
+                console.log(`✅ Found channel ID for ${handle}: ${match[1]}`);
                 return match[1];
             }
         }
         
         throw new Error('Channel ID not found in page');
     } catch (error) {
-        console.error('❌ Error getting channel ID:', error.message);
+        console.error(`❌ Error getting channel ID for ${handle}:`, error.message);
         throw error;
     }
 }
 
 // Function to check if channel is live using YouTube API
-async function checkIfChannelIsLive() {
+async function checkIfChannelIsLive(channelHandle) {
     try {
         if (!process.env.YOUTUBE_API_KEY) {
-            console.log('⚠️  No YouTube API key found, using fallback method');
-            return await checkLiveStatusFallback();
+            console.log(`⚠️  No YouTube API key found for ${channelHandle}, using fallback method`);
+            return await checkLiveStatusFallback(channelHandle);
         }
 
-        console.log('🔍 Using YouTube API to check live status...');
-        const channelId = await getChannelIdFromHandle(CHANNEL_HANDLE);
+        console.log(`🔍 Using YouTube API to check live status for ${channelHandle}...`);
+        const channelId = await getChannelIdFromHandle(channelHandle);
         
         // Search for live streams from this channel
         const searchResponse = await axios.get('https://www.googleapis.com/youtube/v3/search', {
@@ -102,33 +347,134 @@ async function checkIfChannelIsLive() {
             const liveVideo = searchResponse.data.items[0];
             const liveUrl = `https://www.youtube.com/watch?v=${liveVideo.id.videoId}`;
             
-            console.log(`🎥 Found live stream: ${liveVideo.snippet.title}`);
+            console.log(`🎥 Found live stream for ${channelHandle}: ${liveVideo.snippet.title}`);
             return {
                 isLive: true,
                 liveUrl: liveUrl,
                 title: liveVideo.snippet.title,
                 thumbnail: liveVideo.snippet.thumbnails?.default?.url,
-                videoId: liveVideo.id.videoId
+                videoId: liveVideo.id.videoId,
+                method: 'api'
             };
         }
 
-        console.log('📺 No live streams found via API');
+        console.log(`📺 No live streams found via API for ${channelHandle}`);
         return { isLive: false, liveUrl: null };
         
     } catch (error) {
-        console.error('❌ YouTube API failed:', error.message);
-        console.log('🔄 Trying fallback method...');
-        return await checkLiveStatusFallback();
+        console.error(`❌ YouTube API failed for ${channelHandle}:`, error.message);
+        console.log(`🔄 Trying fallback method for ${channelHandle}...`);
+        return await checkLiveStatusFallback(channelHandle);
     }
 }
 
-// Fallback method to check live status
-async function checkLiveStatusFallback() {
+// Function to get latest videos
+async function getLatestVideos(channelHandle, maxResults = 10) {
     try {
-        console.log('🔍 Using fallback method to check live status...');
+        if (!process.env.YOUTUBE_API_KEY) {
+            return await getLatestVideosFallback(channelHandle, maxResults);
+        }
+
+        console.log(`🔍 Getting latest videos for ${channelHandle}...`);
+        const channelId = await getChannelIdFromHandle(channelHandle);
         
-        // Method 1: Try to scrape the channel page directly
-        const response = await axios.get(CHANNEL_URL, {
+        const searchResponse = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+            params: {
+                part: 'snippet',
+                channelId: channelId,
+                type: 'video',
+                order: 'date',
+                key: process.env.YOUTUBE_API_KEY,
+                maxResults: maxResults
+            },
+            timeout: 15000
+        });
+
+        const videos = searchResponse.data.items.map(item => ({
+            videoId: item.id.videoId,
+            title: item.snippet.title,
+            thumbnail: item.snippet.thumbnails?.default?.url,
+            publishedAt: new Date(item.snippet.publishedAt).toLocaleDateString(),
+            url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
+            viewCount: 'N/A' // View count requires additional API call
+        }));
+
+        return {
+            success: true,
+            videos: videos,
+            channel: channelHandle,
+            method: 'api'
+        };
+        
+    } catch (error) {
+        console.error(`❌ Error getting videos for ${channelHandle}:`, error.message);
+        return await getLatestVideosFallback(channelHandle, maxResults);
+    }
+}
+
+// Function to get latest shorts
+async function getLatestShorts(channelHandle, maxResults = 10) {
+    try {
+        if (!process.env.YOUTUBE_API_KEY) {
+            return await getLatestShortsFallback(channelHandle, maxResults);
+        }
+
+        console.log(`🔍 Getting latest shorts for ${channelHandle}...`);
+        const channelId = await getChannelIdFromHandle(channelHandle);
+        
+        const searchResponse = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+            params: {
+                part: 'snippet',
+                channelId: channelId,
+                type: 'video',
+                order: 'date',
+                key: process.env.YOUTUBE_API_KEY,
+                maxResults: maxResults * 2, // Get more to filter for shorts
+                videoDuration: 'short' // Less than 4 minutes
+            },
+            timeout: 15000
+        });
+
+        // Filter for actual shorts (YouTube Shorts are typically under 60 seconds)
+        const shorts = searchResponse.data.items
+            .filter(item => {
+                const title = item.snippet.title.toLowerCase();
+                const description = item.snippet.description?.toLowerCase() || '';
+                return title.includes('#shorts') || description.includes('#shorts') || 
+                       title.includes('short') || description.includes('short');
+            })
+            .slice(0, maxResults)
+            .map(item => ({
+                videoId: item.id.videoId,
+                title: item.snippet.title,
+                thumbnail: item.snippet.thumbnails?.default?.url,
+                publishedAt: new Date(item.snippet.publishedAt).toLocaleDateString(),
+                url: `https://www.youtube.com/shorts/${item.id.videoId}`,
+                viewCount: 'N/A' // View count requires additional API call
+            }));
+
+        return {
+            success: true,
+            shorts: shorts,
+            channel: channelHandle,
+            method: 'api'
+        };
+        
+    } catch (error) {
+        console.error(`❌ Error getting shorts for ${channelHandle}:`, error.message);
+        return await getLatestShortsFallback(channelHandle, maxResults);
+    }
+}
+
+// Fallback methods
+async function checkLiveStatusFallback(channelHandle) {
+    try {
+        console.log(`🔍 Using fallback method to check live status for ${channelHandle}...`);
+        
+        const cleanHandle = channelHandle.startsWith('@') ? channelHandle : `@${channelHandle}`;
+        const channelUrl = `https://www.youtube.com/${cleanHandle}`;
+        
+        const response = await axios.get(channelUrl, {
             timeout: 15000,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -156,7 +502,7 @@ async function checkLiveStatusFallback() {
                 const titleMatch = html.match(new RegExp(`"videoId":"${videoId}".*?"title":"([^"]+)"`));
                 const title = titleMatch ? titleMatch[1] : 'Live Stream';
                 
-                console.log(`🎥 Found live stream via fallback: ${title}`);
+                console.log(`🎥 Found live stream via fallback for ${channelHandle}: ${title}`);
                 return {
                     isLive: true,
                     liveUrl: liveUrl,
@@ -167,30 +513,110 @@ async function checkLiveStatusFallback() {
             }
         }
         
-        // Method 2: Check for LIVE badge in a simpler way
-        if (html.includes('"isLiveContent":true') || html.includes('BADGE_STYLE_TYPE_LIVE_NOW')) {
-            console.log('🎥 Live content detected but couldn\'t extract video ID');
-            // Could return the channel URL as fallback
-            return {
-                isLive: true,
-                liveUrl: CHANNEL_URL,
-                title: 'Live Stream (Check Channel)',
-                method: 'fallback_basic'
-            };
-        }
-
-        console.log('📺 No live streams found via fallback');
+        console.log(`📺 No live streams found via fallback for ${channelHandle}`);
         return { isLive: false, liveUrl: null };
         
     } catch (error) {
-        console.error('❌ Fallback method failed:', error.message);
+        console.error(`❌ Fallback method failed for ${channelHandle}:`, error.message);
         return { isLive: false, liveUrl: null };
     }
 }
 
+async function getLatestVideosFallback(channelHandle, maxResults = 10) {
+    try {
+        console.log(`🔍 Using fallback method to get videos for ${channelHandle}...`);
+        
+        const cleanHandle = channelHandle.startsWith('@') ? channelHandle : `@${channelHandle}`;
+        const channelUrl = `https://www.youtube.com/${cleanHandle}/videos`;
+        
+        const response = await axios.get(channelUrl, {
+            timeout: 15000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        });
+
+        const html = response.data;
+        const videoIds = [];
+        const videoPattern = /"videoId":"([^"]+)"/g;
+        let match;
+        
+        while ((match = videoPattern.exec(html)) !== null && videoIds.length < maxResults) {
+            if (!videoIds.includes(match[1])) {
+                videoIds.push(match[1]);
+            }
+        }
+
+        const videos = videoIds.map(videoId => ({
+            videoId: videoId,
+            title: 'Recent Video',
+            thumbnail: `https://img.youtube.com/vi/${videoId}/default.jpg`,
+            publishedAt: 'Recent',
+            url: `https://www.youtube.com/watch?v=${videoId}`,
+            viewCount: 'N/A'
+        }));
+
+        return {
+            success: true,
+            videos: videos,
+            channel: channelHandle,
+            method: 'fallback'
+        };
+        
+    } catch (error) {
+        console.error(`❌ Fallback videos method failed for ${channelHandle}:`, error.message);
+        return { success: false, videos: [], channel: channelHandle };
+    }
+}
+
+async function getLatestShortsFallback(channelHandle, maxResults = 10) {
+    try {
+        console.log(`🔍 Using fallback method to get shorts for ${channelHandle}...`);
+        
+        const cleanHandle = channelHandle.startsWith('@') ? channelHandle : `@${channelHandle}`;
+        const channelUrl = `https://www.youtube.com/${cleanHandle}/shorts`;
+        
+        const response = await axios.get(channelUrl, {
+            timeout: 15000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        });
+
+        const html = response.data;
+        const shortIds = [];
+        const shortPattern = /"videoId":"([^"]+)"/g;
+        let match;
+        
+        while ((match = shortPattern.exec(html)) !== null && shortIds.length < maxResults) {
+            if (!shortIds.includes(match[1])) {
+                shortIds.push(match[1]);
+            }
+        }
+
+        const shorts = shortIds.map(videoId => ({
+            videoId: videoId,
+            title: 'Recent Short',
+            thumbnail: `https://img.youtube.com/vi/${videoId}/default.jpg`,
+            publishedAt: 'Recent',
+            url: `https://www.youtube.com/shorts/${videoId}`,
+            viewCount: 'N/A'
+        }));
+
+        return {
+            success: true,
+            shorts: shorts,
+            channel: channelHandle,
+            method: 'fallback'
+        };
+        
+    } catch (error) {
+        console.error(`❌ Fallback shorts method failed for ${channelHandle}:`, error.message);
+        return { success: false, shorts: [], channel: channelHandle };
+    }
+}
+
 // Function to shorten URL using multiple services
-
-
 async function shortenUrl(longUrl) {
     console.log(`🔗 Attempting to shorten URL: ${longUrl}`);
 
@@ -204,9 +630,7 @@ async function shortenUrl(longUrl) {
                     data: { url: longUrl },
                     headers: {
                         'Content-Type': 'application/json',
-                        // Try with or without Bearer depending on docs
                         'Authorization': process.env.LINKTW_API_KEY 
-                        // 'Authorization': `Bearer ${process.env.Linktw_API_KEY}` // if required
                     }
                 }
             ]
@@ -250,24 +674,14 @@ async function shortenUrl(longUrl) {
 
                 if (config.data) axiosConfig.data = config.data;
 
-                // 🔍 Debug: Show exactly what we're sending
-                if (shortener.name === 'linktw.in') {
-                    console.log("📤 Sending to Linktw.in:");
-                    console.log("Headers:", axiosConfig.headers);
-                    console.log("Data:", axiosConfig.data);
-                }
-
                 const response = await axios(axiosConfig);
-
-                // 🔍 Debug: Show full raw response
-                console.log(`📥 Raw response from ${shortener.name}:`, response.data);
 
                 let shorturl = null;
 
                 if (typeof response.data === 'string') {
                     shorturl = response.data.trim();
                 } else if (response.data) {
-                    const fields = ['short_url', 'shorturl', 'shortened_url', 'url', 'link', 'short','shorturl'];
+                    const fields = ['short_url', 'shorturl', 'shortened_url', 'url', 'link', 'short'];
                     for (const field of fields) {
                         if (response.data[field]) {
                             shorturl = response.data[field];
@@ -287,21 +701,11 @@ async function shortenUrl(longUrl) {
                 }
 
             } catch (error) {
-                console.log(`❌ ${shortener.name} failed:`);
-                if (error.response) {
-                    console.log("Status:", error.response.status);
-                    console.log("Response body:", error.response.data);
-                } else {
-                    console.log("Error:", error.message);
-                }
+                console.log(`❌ ${shortener.name} failed:`, error.response?.status || error.message);
                 continue;
             }
         }
     }
-
-    return { success: false, error: 'All shorteners failed' };
-
-
 
     // All shorteners failed, return original URL
     console.warn('⚠️  All URL shortening services failed, returning original URL');
@@ -313,11 +717,12 @@ async function shortenUrl(longUrl) {
         error: 'All shortening services failed'
     };
 }
-//format discord message
+
+// Format discord message
 function formatDiscordMessage(data) {
     const baseEmbed = {
-        color: 0x5865F2, // Default blue
-        footer: { text: "YouTube Live Monitor" },
+        color: 0x5865F2,
+        footer: { text: "YouTube Monitor Pro" },
         timestamp: new Date().toISOString()
     };
 
@@ -327,34 +732,24 @@ function formatDiscordMessage(data) {
                 embeds: [{
                     ...baseEmbed,
                     title: `🔴 ${data.title || 'Live Now!'}`,
-                    description: `${CHANNEL_HANDLE} is now live on YouTube!\n\n[Watch Here](${data.shorturl})`,
+                    description: `${data.channelHandle} is now live on YouTube!\n\n[Watch Here](${data.shorturl})\n\n[Copy Link](${data.shorturl})`,
                     url: data.shorturl,
-                    color: 0xFF0000, // Red
+                    color: 0xFF0000,
                     thumbnail: {
-                        url: data.thumbnail || 'https://i.imgur.com/4M34hi2.png'
+                        url: data.thumbnail || `https://img.youtube.com/vi/${data.videoId}/default.jpg`
                     },
                     fields: [
                         {
                             name: "Channel",
-                            value: `[${CHANNEL_HANDLE}](${CHANNEL_URL})`,
+                            value: `[${data.channelHandle}](${data.channelUrl})`,
                             inline: true
                         },
                         {
-                            name: "Short Link",
-                            value: `[${data.shorturl.replace(/^https?:\/\//, '')}](${data.shorturl})`,
+                            name: "Published",
+                            value: data.publishedAt || 'Recently',
                             inline: true
                         }
                     ]
-                }]
-            };
-
-        case 'stream_ended':
-            return {
-                embeds: [{
-                    ...baseEmbed,
-                    title: '📴 Stream Ended',
-                    description: `${CHANNEL_HANDLE}'s stream has ended.`,
-                    color: 0x808080 // Gray
                 }]
             };
 
@@ -363,8 +758,8 @@ function formatDiscordMessage(data) {
                 embeds: [{
                     ...baseEmbed,
                     title: '⚠️ Monitoring Error',
-                    description: `Too many errors while checking ${CHANNEL_HANDLE}`,
-                    color: 0xFFA500, // Orange
+                    description: `Too many errors while checking ${data.channelHandle}`,
+                    color: 0xFFA500,
                     fields: [
                         {
                             name: 'Consecutive Errors',
@@ -381,306 +776,316 @@ function formatDiscordMessage(data) {
                     ...baseEmbed,
                     title: '🧪 Test Webhook',
                     description: 'This is a test notification from the YouTube monitor system.',
-                    color: 0x00FF00 // Green
+                    color: 0x00FF00
                 }]
             };
 
         default:
             return {
-                content: `📡 Event from ${CHANNEL_HANDLE}: \`${data.event}\`\n${data.message || ''}`
+                content: `📡 Event from ${data.channelHandle}: \`${data.event}\`\n${data.message || ''}`
             };
     }
 }
 
+// API Routes
 
-
-// Function to send webhook notification
-async function sendWebhookNotification(data) {
-    if (!WEBHOOK_URL) {
-        console.log('⚠️  No webhook URL configured, skipping notification');
-        return false;
-    }
-
-    try {
-        console.log('📤 Sending webhook notification...');
-
-        let payload;
-
-        // Use embed format for stream_started event
-        if (data.event === 'stream_started') {
-            payload = formatDiscordMessage({
-                ...data,
-                shorturl: data.shorturl,
-                title: data.title,
-                thumbnail: data.thumbnail
-            });
-        } else {
-            // Simple message for other events like stream_ended, test, errors, etc.
-            payload = {
-                content: `📡 **${CHANNEL_HANDLE}** event: \`${data.event}\`\n${data.message || ''}`
-            };
-        }
-
-        const response = await axios.post(WEBHOOK_URL, payload, {
-            timeout: 10000,
-            headers: {
-                'Content-Type': 'application/json',
-                'User-Agent': 'YouTube-Live-Monitor/1.0'
-            }
-        });
-
-        if (response.status >= 200 && response.status < 300) {
-            console.log('✅ Webhook notification sent successfully');
-            return true;
-        } else {
-            console.error('❌ Webhook failed with status:', response.status);
-            return false;
-        }
-    } catch (error) {
-        console.error('❌ Webhook notification failed:', error.response?.data || error.message);
-        return false;
-    }
-}
-
-
-// Function to monitor live status
-async function monitorLiveStatus() {
-    try {
-        console.log('🔍 Monitoring: Checking live status...');
-        const liveStatus = await checkIfChannelIsLive();
-        
-        // Reset consecutive errors on successful check
-        monitoringState.consecutiveErrors = 0;
-
-        // Check if live status changed
-        if (liveStatus.isLive !== monitoringState.lastKnownLiveStatus) {
-            console.log(`🔄 Live status changed: ${monitoringState.lastKnownLiveStatus} → ${liveStatus.isLive}`);
-            
-            if (liveStatus.isLive && liveStatus.liveUrl) {
-                // Channel went LIVE
-                console.log('🎉 Channel just went LIVE! Creating short link...');
-                
-                const shortenerResult = await shortenUrl(liveStatus.liveUrl);
-                
-                // Update cache
-                const now = Date.now();
-                cachedLiveData = {
-                    shorturl: shortenerResult.shorturl,
-                    lastChecked: now,
-                    isLive: true,
-                    liveUrl: liveStatus.liveUrl,
-                    title: liveStatus.title
-                };
-
-                // Send webhook notification
-                await sendWebhookNotification({
-                    event: 'stream_started',
-                    isLive: true,
-                    shorturl: shortenerResult.shorturl,
-                    originalUrl: liveStatus.liveUrl,
-                    title: liveStatus.title,
-                    shortenerService: shortenerResult.service,
-                    method: liveStatus.method,
-                    thumbnail: liveStatus.thumbnail
-                });
-
-                console.log(`✅ Live stream notification sent: ${shortenerResult.shorturl}`);
-                
-            } else if (!liveStatus.isLive && monitoringState.lastKnownLiveStatus) {
-                // Channel went OFFLINE
-                console.log('📺 Channel went offline');
-                
-                // Update cache
-                cachedLiveData = {
-                    shorturl: null,
-                    lastChecked: Date.now(),
-                    isLive: false,
-                    liveUrl: null,
-                    title: null
-                };
-
-                // Send webhook notification
-                await sendWebhookNotification({
-                    event: 'stream_ended',
-                    isLive: false,
-                    message: 'Stream has ended'
-                });
-            }
-            
-            // Update last known status
-            monitoringState.lastKnownLiveStatus = liveStatus.isLive;
-        } else {
-            console.log(`📊 Status unchanged: ${liveStatus.isLive ? 'LIVE' : 'OFFLINE'}`);
-        }
-
-    } catch (error) {
-        console.error('❌ Monitoring error:', error.message);
-        monitoringState.consecutiveErrors++;
-        
-        // Stop monitoring if too many consecutive errors
-        if (monitoringState.consecutiveErrors >= monitoringState.maxConsecutiveErrors) {
-            console.error('❌ Too many consecutive errors, stopping monitoring');
-            stopMonitoring();
-            
-            // Send error webhook
-            await sendWebhookNotification({
-                event: 'monitoring_error',
-                error: 'Monitoring stopped due to consecutive errors',
-                consecutiveErrors: monitoringState.consecutiveErrors
-            });
-        }
-    }
-}
-
-// Function to start monitoring
-function startMonitoring() {
-    if (monitoringState.isMonitoring) {
-        console.log('⚠️  Monitoring is already running');
-        return false;
-    }
-
-    console.log('🚀 Starting automatic live stream monitoring...');
-    console.log(`🕒 Check interval: ${MONITOR_INTERVAL / 1000}s`);
-    console.log(`📡 Webhook URL: ${WEBHOOK_URL ? '✅ Configured' : '❌ Not configured'}`);
-    
-    monitoringState.isMonitoring = true;
-    monitoringState.consecutiveErrors = 0;
-    
-    // Start monitoring immediately
-    monitorLiveStatus();
-    
-    // Set up interval
-    monitoringState.intervalId = setInterval(monitorLiveStatus, MONITOR_INTERVAL);
-    
-    return true;
-}
-
-// Function to stop monitoring
-function stopMonitoring() {
-    if (!monitoringState.isMonitoring) {
-        console.log('⚠️  Monitoring is not running');
-        return false;
-    }
-
-    console.log('🛑 Stopping automatic live stream monitoring...');
-    
-    if (monitoringState.intervalId) {
-        clearInterval(monitoringState.intervalId);
-        monitoringState.intervalId = null;
-    }
-    
-    monitoringState.isMonitoring = false;
-    monitoringState.consecutiveErrors = 0;
-    
-    return true;
-}
-
-// Main API endpoint (unchanged)
+// Enhanced main API endpoint - now supports different content types
 app.get('/api/live-link', async (req, res) => {
     try {
+        const channelInput = req.query.channel;
+        const contentType = req.query.type || 'live'; // live, videos, shorts, all
+        
+        if (!channelInput) {
+            return res.status(400).json({
+                success: false,
+                error: 'Channel parameter is required'
+            });
+        }
+
+        // Extract channel handle from URL if provided
+        let channelHandle = channelInput.trim();
+        try {
+            const url = new URL(channelInput.startsWith('http') ? channelInput : `https://${channelInput}`);
+            if (url.hostname.includes('youtube.com') || url.hostname.includes('youtube')) {
+                const pathParts = url.pathname.split('/').filter(part => part);
+                if (pathParts.length > 0) {
+                    channelHandle = pathParts[0];
+                }
+            }
+        } catch (e) {
+            // Not a valid URL, assume it's a handle
+        }
+
+        // Ensure handle starts with @
+        if (!channelHandle.startsWith('@')) {
+            channelHandle = `@${channelHandle}`;
+        }
+
         const now = Date.now();
+        const cacheKey = `${channelHandle}_${contentType}`;
         
         // Check cache
-        if (cachedLiveData.lastChecked && (now - cachedLiveData.lastChecked) < CACHE_DURATION) {
-            console.log('📋 Returning cached data');
+        const cachedData = globalCache.get(cacheKey);
+        if (cachedData && (now - cachedData.lastChecked) < CACHE_DURATION) {
+            console.log(`📋 Returning cached data for ${channelHandle} (${contentType})`);
             return res.json({
                 success: true,
                 cached: true,
-                isLive: cachedLiveData.isLive,
-                shorturl: cachedLiveData.shorturl,
-                originalUrl: cachedLiveData.liveUrl,
-                title: cachedLiveData.title,
-                channel: CHANNEL_HANDLE,
-                lastChecked: new Date(cachedLiveData.lastChecked).toISOString(),
-                cacheExpiresIn: Math.max(0, CACHE_DURATION - (now - cachedLiveData.lastChecked))
+                ...cachedData,
+                channel: channelHandle,
+                channelUrl: `https://www.youtube.com/${channelHandle}`,
+                lastChecked: new Date(cachedData.lastChecked).toISOString(),
+                cacheExpiresIn: Math.max(0, CACHE_DURATION - (now - cachedData.lastChecked))
             });
         }
 
-        console.log(`🔍 Checking if ${CHANNEL_HANDLE} is live...`);
-        const liveStatus = await checkIfChannelIsLive();
+        console.log(`🔍 Checking ${contentType} for ${channelHandle}...`);
+        let result = {};
 
-        if (liveStatus.isLive && liveStatus.liveUrl) {
-            console.log('🎥 Channel is LIVE! Shortening URL...');
-            
-            // Shorten the live URL
-            const shortenerResult = await shortenUrl(liveStatus.liveUrl);
-            
-            // Update cache
-            cachedLiveData = {
-                shorturl: shortenerResult.shorturl,
-                lastChecked: now,
-                isLive: true,
-                liveUrl: liveStatus.liveUrl,
-                title: liveStatus.title
-            };
+        switch (contentType) {
+            case 'live':
+                const liveStatus = await checkIfChannelIsLive(channelHandle);
+                if (liveStatus.isLive && liveStatus.liveUrl) {
+                    const shortenerResult = await shortenUrl(liveStatus.liveUrl);
+                    result = {
+                        success: true,
+                        isLive: true,
+                        hasContent: true,
+                        shorturl: shortenerResult.shorturl,
+                        originalUrl: liveStatus.liveUrl,
+                        title: liveStatus.title,
+                        thumbnail: liveStatus.thumbnail,
+                        shortenerService: shortenerResult.service,
+                        method: liveStatus.method
+                    };
+                } else {
+                    result = {
+                        success: true,
+                        isLive: false,
+                        hasContent: false,
+                        message: `${channelHandle} is not currently live`
+                    };
+                }
+                break;
 
-            res.json({
-                success: true,
-                isLive: true,
-                shorturl: shortenerResult.shorturl,
-                originalUrl: liveStatus.liveUrl,
-                title: liveStatus.title,
-                channel: CHANNEL_HANDLE,
-                shortenerService: shortenerResult.service,
-                method: liveStatus.method,
-                lastChecked: new Date(now).toISOString(),
-                thumbnail: liveStatus.thumbnail
-            });
-        } else {
-            console.log(`📺 ${CHANNEL_HANDLE} is not currently live`);
-            
-            // Update cache
-            cachedLiveData = {
-                shorturl: null,
-                lastChecked: now,
-                isLive: false,
-                liveUrl: null,
-                title: null
-            };
+                case 'videos':
+                const videoResult = await getLatestVideos(channelHandle, 8);
+                if (videoResult.success && videoResult.videos.length > 0) {
+                    // Shorten URLs for videos
+                    for (let video of videoResult.videos) {
+                        const shortenerResult = await shortenUrl(video.url);
+                        video.shorturl = shortenerResult.shorturl; // Changed from shortUrl to shorturl
+                        video.shortenerService = shortenerResult.service; // Add service info
+                    }
+                    result = {
+                        success: true,
+                        hasContent: true,
+                        videos: videoResult.videos,
+                        contentType: 'videos'
+                    };
+                } else {
+                    result = {
+                        success: true,
+                        hasContent: false,
+                        videos: [],
+                        message: `No recent videos found for ${channelHandle}`
+                    };
+                }
+                break;
 
-            res.json({
-                success: true,
-                isLive: false,
-                message: `${CHANNEL_HANDLE} is not currently live`,
-                channel: CHANNEL_HANDLE,
-                channelUrl: CHANNEL_URL,
-                lastChecked: new Date(now).toISOString()
-            });
+                 // For shorts section (around line 430-450):
+                case 'shorts':
+                const shortResult = await getLatestShorts(channelHandle, 10);
+                if (shortResult.success && shortResult.shorts.length > 0) {
+                    // Shorten URLs for shorts
+                    for (let short of shortResult.shorts) {
+                        const shortenerResult = await shortenUrl(short.url);
+                        short.shorturl = shortenerResult.shorturl; // Changed from shortUrl to shorturl
+                        short.shortenerService = shortenerResult.service; // Add service info
+                    }
+                    result = {
+                        success: true,
+                        hasContent: true,
+                        shorts: shortResult.shorts,
+                        contentType: 'shorts'
+                    };
+                    } else {
+                            result = {
+                                success: true,
+                                hasContent: false,
+                                shorts: [],
+                                message: `No recent shorts found for ${channelHandle}`
+                            };
+                        }
+                        break;
+
+            case 'all':
+                // Get all content types
+                const [liveResult, videosResult, shortsResult] = await Promise.all([
+                    checkIfChannelIsLive(channelHandle),
+                    getLatestVideos(channelHandle, 10),
+                    getLatestShorts(channelHandle, 10)
+                ]);
+
+                result = {
+                    success: true,
+                    contentType: 'all'
+                };
+
+                // Process live stream
+                if (liveResult.isLive && liveResult.liveUrl) {
+                    const shortenerResult = await shortenUrl(liveResult.liveUrl);
+                    result.isLive = true;
+                    result.liveStream = {
+                        title: liveResult.title,
+                        url: liveResult.liveUrl,
+                        shortUrl: shortenerResult.shorturl,
+                        thumbnail: liveResult.thumbnail
+                    };
+                } else {
+                    result.isLive = false;
+                }
+
+                // Process videos
+                if (videosResult.success && videosResult.videos.length > 0) {
+                    for (let video of videosResult.videos) {
+                        const shortenerResult = await shortenUrl(video.url);
+                        video.shorturl = shortenerResult.shorturl; // Changed from shortUrl to shorturl
+                        video.shortenerService = shortenerResult.service;
+                    }
+                    result.videos = videosResult.videos;
+                } else {
+                    result.videos = [];
+                }
+
+                // Process shorts
+                if (shortsResult.success && shortsResult.shorts.length > 0) {
+                    for (let short of shortsResult.shorts) {
+                        const shortenerResult = await shortenUrl(short.url);
+                        short.shorturl = shortenerResult.shorturl; // Changed from shortUrl to shorturl
+                        short.shortenerService = shortenerResult.service;
+                    }
+                    result.shorts = shortsResult.shorts;
+                } else {
+                    result.shorts = [];
+                }
+
+                result.hasContent = result.isLive || result.videos.length > 0 || result.shorts.length > 0;
+                break;
         }
+
+        // Update cache
+        globalCache.set(cacheKey, {
+            ...result,
+            lastChecked: now
+        });
+
+        res.json({
+            ...result,
+            channel: channelHandle,
+            channelUrl: `https://www.youtube.com/${channelHandle}`,
+            lastChecked: new Date(now).toISOString()
+        });
+
     } catch (error) {
         console.error('❌ API Error:', error.message);
         res.status(500).json({
             success: false,
             error: error.message,
-            channel: CHANNEL_HANDLE,
             timestamp: new Date().toISOString()
         });
     }
 });
 
-// NEW MONITORING ENDPOINTS
-
-// Start monitoring endpoint
-app.post('/api/monitoring/start', (req, res) => {
+// Enhanced start monitoring endpoint
+app.post('/api/monitoring/start', async (req, res) => {
     try {
-        const started = startMonitoring();
+        const { channel, webhook, interval, contentTypes } = req.body;
         
-        if (started) {
+        if (!channel) {
+            return res.status(400).json({
+                success: false,
+                error: 'Channel parameter is required'
+            });
+        }
+
+        if (!webhook) {
+            return res.status(400).json({
+                success: false,
+                error: 'Webhook URL is required'
+            });
+        }
+
+        // Extract and normalize channel handle
+        let channelHandle = channel.trim();
+        try {
+            const url = new URL(channel.startsWith('http') ? channel : `https://${channel}`);
+            if (url.hostname.includes('youtube.com') || url.hostname.includes('youtube')) {
+                const pathParts = url.pathname.split('/').filter(part => part);
+                if (pathParts.length > 0) {
+                    channelHandle = pathParts[0];
+                }
+            }
+        } catch (e) {
+            // Not a valid URL, assume it's a handle
+        }
+
+        // Ensure handle starts with @
+        if (!channelHandle.startsWith('@')) {
+            channelHandle = `@${channelHandle}`;
+        }
+
+        // Validate content types
+        const validContentTypes = ['live', 'videos', 'shorts'];
+        const selectedTypes = contentTypes && Array.isArray(contentTypes) 
+            ? contentTypes.filter(type => validContentTypes.includes(type))
+            : ['live'];
+
+        if (selectedTypes.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'At least one valid content type must be specified'
+            });
+        }
+
+        // Check if already monitoring this channel
+        if (monitoringInstances.has(channelHandle)) {
+            const existingInstance = monitoringInstances.get(channelHandle);
+            if (existingInstance.isMonitoring) {
+                return res.json({
+                    success: false,
+                    message: `Already monitoring ${channelHandle}`,
+                    status: existingInstance.getStatus()
+                });
+            }
+        }
+
+        // Create new monitoring instance
+        const monitoringInterval = interval ? parseInt(interval) * 1000 : DEFAULT_MONITOR_INTERVAL;
+        const instance = new MonitoringInstance(channelHandle, webhook, monitoringInterval, selectedTypes);
+        
+        // Start monitoring
+        const result = await instance.start();
+        
+        if (result.success) {
+            monitoringInstances.set(channelHandle, instance);
+            
             res.json({
                 success: true,
-                message: 'Monitoring started successfully',
+                message: `Started monitoring ${channelHandle} for ${selectedTypes.join(', ')}`,
                 config: {
-                    channel: CHANNEL_HANDLE,
-                    interval: MONITOR_INTERVAL / 1000,
-                    webhookConfigured: !!WEBHOOK_URL
+                    channel: channelHandle,
+                    interval: monitoringInterval / 1000,
+                    contentTypes: selectedTypes,
+                    webhookConfigured: true
                 },
-                status: monitoringState
+                status: instance.getStatus()
             });
         } else {
             res.json({
                 success: false,
-                message: 'Monitoring is already running',
-                status: monitoringState
+                message: result.message,
+                status: instance.getStatus()
             });
         }
     } catch (error) {
@@ -694,13 +1099,51 @@ app.post('/api/monitoring/start', (req, res) => {
 // Stop monitoring endpoint
 app.post('/api/monitoring/stop', (req, res) => {
     try {
-        const stopped = stopMonitoring();
+        const { channel } = req.body;
         
-        res.json({
-            success: true,
-            message: stopped ? 'Monitoring stopped successfully' : 'Monitoring was not running',
-            status: monitoringState
-        });
+        if (channel) {
+            // Stop specific channel monitoring
+            let channelHandle = channel.trim();
+            if (!channelHandle.startsWith('@')) {
+                channelHandle = `@${channelHandle}`;
+            }
+            
+            const instance = monitoringInstances.get(channelHandle);
+            if (!instance) {
+                return res.json({
+                    success: false,
+                    message: `Not monitoring ${channelHandle}`
+                });
+            }
+            
+            const result = instance.stop();
+            if (result.success) {
+                monitoringInstances.delete(channelHandle);
+            }
+            
+            res.json({
+                success: result.success,
+                message: result.message,
+                channel: channelHandle,
+                status: instance.getStatus()
+            });
+        } else {
+            // Stop all monitoring
+            let stoppedCount = 0;
+            for (const [channelHandle, instance] of monitoringInstances) {
+                if (instance.isMonitoring) {
+                    instance.stop();
+                    stoppedCount++;
+                }
+            }
+            monitoringInstances.clear();
+            
+            res.json({
+                success: true,
+                message: `Stopped monitoring ${stoppedCount} channels`,
+                stoppedChannels: stoppedCount
+            });
+        }
     } catch (error) {
         res.status(500).json({
             success: false,
@@ -711,28 +1154,72 @@ app.post('/api/monitoring/stop', (req, res) => {
 
 // Monitoring status endpoint
 app.get('/api/monitoring/status', (req, res) => {
-    res.json({
-        success: true,
-        monitoring: {
-            ...monitoringState,
-            config: {
-                channel: CHANNEL_HANDLE,
-                interval: MONITOR_INTERVAL / 1000,
-                webhookConfigured: !!WEBHOOK_URL,
-                webhookUrl: WEBHOOK_URL ? WEBHOOK_URL.replace(/\/[^\/]*$/, '/***') : null // Hide sensitive parts
+    try {
+        const { channel } = req.query;
+        
+        if (channel) {
+            // Get status for specific channel
+            let channelHandle = channel.trim();
+            if (!channelHandle.startsWith('@')) {
+                channelHandle = `@${channelHandle}`;
             }
-        },
-        cache: {
-            ...cachedLiveData,
-            lastChecked: cachedLiveData.lastChecked ? new Date(cachedLiveData.lastChecked).toISOString() : null
+            
+            const instance = monitoringInstances.get(channelHandle);
+            if (!instance) {
+                return res.json({
+                    success: false,
+                    message: `Not monitoring ${channelHandle}`
+                });
+            }
+            
+            res.json({
+                success: true,
+                monitoring: instance.getStatus(),
+                cache: globalCache.get(channelHandle) || null
+            });
+        } else {
+            // Get status for all monitored channels
+            const allStatuses = [];
+            for (const [channelHandle, instance] of monitoringInstances) {
+                allStatuses.push({
+                    ...instance.getStatus(),
+                    cache: globalCache.get(channelHandle) || null
+                });
+            }
+            
+            res.json({
+                success: true,
+                totalChannels: allStatuses.length,
+                activeChannels: allStatuses.filter(s => s.isMonitoring).length,
+                monitoring: allStatuses
+            });
         }
-    });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
 });
 
 // Test webhook endpoint
 app.post('/api/monitoring/test-webhook', async (req, res) => {
     try {
-        const success = await sendWebhookNotification({
+        const { webhook, channel } = req.body;
+        
+        if (!webhook) {
+            return res.status(400).json({
+                success: false,
+                error: 'Webhook URL is required'
+            });
+        }
+
+        const testChannel = channel || '@testchannel';
+        
+        // Create temporary instance for testing
+        const tempInstance = new MonitoringInstance(testChannel, webhook);
+        
+        const success = await tempInstance.sendWebhookNotification({
             event: 'test',
             message: 'This is a test webhook notification',
             timestamp: new Date().toISOString()
@@ -741,7 +1228,8 @@ app.post('/api/monitoring/test-webhook', async (req, res) => {
         res.json({
             success: success,
             message: success ? 'Test webhook sent successfully' : 'Test webhook failed',
-            webhookUrl: WEBHOOK_URL ? WEBHOOK_URL.replace(/\/[^\/]*$/, '/***') : 'Not configured'
+            webhookUrl: webhook.replace(/\/[^\/]*$/, '/***'),
+            testChannel: testChannel
         });
     } catch (error) {
         res.status(500).json({
@@ -751,103 +1239,179 @@ app.post('/api/monitoring/test-webhook', async (req, res) => {
     }
 });
 
-// Health check endpoint (updated)
+// Health check endpoint
 app.get('/health', (req, res) => {
+    const activeChannels = Array.from(monitoringInstances.values()).filter(i => i.isMonitoring);
+    
     res.json({
         status: 'OK',
-        service: 'YouTube Live Stream Shortener API',
-        channel: CHANNEL_HANDLE,
+        service: 'YouTube Monitor Pro API',
+        version: '2.1.0',
         timestamp: new Date().toISOString(),
         uptime: Math.floor(process.uptime()),
         monitoring: {
-            isActive: monitoringState.isMonitoring,
-            lastKnownStatus: monitoringState.lastKnownLiveStatus,
-            consecutiveErrors: monitoringState.consecutiveErrors
+            totalChannels: monitoringInstances.size,
+            activeChannels: activeChannels.length,
+            channels: activeChannels.map(i => ({
+                handle: i.channelHandle,
+                contentTypes: i.contentTypes
+            }))
         },
         cache: {
-            lastChecked: cachedLiveData.lastChecked ? new Date(cachedLiveData.lastChecked).toISOString() : null,
-            isLive: cachedLiveData.isLive
+            totalEntries: globalCache.size,
+            channels: Array.from(globalCache.keys())
         }
     });
 });
 
-// Channel info endpoint (updated)
-app.get('/api/channel-info', (req, res) => {
+// API info endpoint
+app.get('/api/info', (req, res) => {
     res.json({
         success: true,
-        channel: {
-            handle: CHANNEL_HANDLE,
-            url: CHANNEL_URL,
-            name: 'moonvlr5'
-        },
-        api: {
-            version: '2.0.0',
-            endpoints: [
-                'GET /api/live-link - Get shortened live stream URL',
-                'GET /health - Health check',
-                'GET /api/channel-info - Channel information',
-                'POST /api/refresh - Force refresh cache',
-                'POST /api/monitoring/start - Start automatic monitoring',
-                'POST /api/monitoring/stop - Stop automatic monitoring',
-                'GET /api/monitoring/status - Get monitoring status',
-                'POST /api/monitoring/test-webhook - Test webhook notification'
-            ]
+        service: {
+            name: 'YouTube Monitor Pro',
+            version: '2.1.0',
+            description: 'Enhanced YouTube channel monitoring with support for live streams, videos, and shorts'
         },
         features: [
-            'Live stream detection',
+            'Live stream monitoring',
+            'Latest videos tracking',
+            'YouTube Shorts monitoring',
+            'Multi-content type support',
             'URL shortening with multiple services',
+            'Discord webhook notifications',
             'Response caching',
-            'Fallback methods',
-            'Automatic monitoring',
-            'Webhook notifications',
-            'Error handling and recovery'
-        ]
+            'Fallback detection methods',
+            'Multi-channel support',
+            'Real-time status monitoring',
+            'Enhanced error handling'
+        ],
+        endpoints: {
+            'GET /api/live-link?channel=@channelname&type=live': 'Get live stream status and short URL',
+            'GET /api/live-link?channel=@channelname&type=videos': 'Get latest videos',
+            'GET /api/live-link?channel=@channelname&type=shorts': 'Get latest shorts',
+            'GET /api/live-link?channel=@channelname&type=all': 'Get all content types',
+            'POST /api/monitoring/start': 'Start monitoring (supports contentTypes array)',
+            'POST /api/monitoring/stop': 'Stop monitoring',
+            'GET /api/monitoring/status': 'Get monitoring status',
+            'POST /api/monitoring/test-webhook': 'Test webhook notification',
+            'GET /health': 'Health check and system status',
+            'GET /api/info': 'API information and documentation'
+        },
+        contentTypes: {
+            'live': 'Live streams and ongoing broadcasts',
+            'videos': 'Latest uploaded videos (excluding shorts)',
+            'shorts': 'Latest YouTube Shorts',
+            'all': 'All content types combined'
+        },
+        configuration: {
+            youtubeApiSupported: !!process.env.YOUTUBE_API_KEY,
+            linktwApiSupported: !!process.env.LINKTW_API_KEY,
+            cacheDuration: CACHE_DURATION / 1000,
+            defaultMonitorInterval: DEFAULT_MONITOR_INTERVAL / 1000
+        }
     });
 });
 
-// Manual refresh endpoint (unchanged)
+// Manual refresh endpoint
 app.post('/api/refresh', async (req, res) => {
     try {
-        console.log('🔄 Manual refresh requested - clearing cache...');
+        const { channel, type } = req.body;
         
-        // Clear cache
-        cachedLiveData = {
-            shorturl: null,
-            lastChecked: null,
-            isLive: false,
-            liveUrl: null,
-            title: null
-        };
-
-        // Force check
-        const liveStatus = await checkIfChannelIsLive();
-        
-        if (liveStatus.isLive && liveStatus.liveUrl) {
-            const shortenerResult = await shortenUrl(liveStatus.liveUrl);
-            
-            cachedLiveData = {
-                shorturl: shortenerResult.shorturl,
-                lastChecked: Date.now(),
-                isLive: true,
-                liveUrl: liveStatus.liveUrl,
-                title: liveStatus.title
-            };
-
-            res.json({
-                success: true,
-                message: 'Cache refreshed - Channel is LIVE!',
-                isLive: true,
-                shorturl: shortenerResult.shorturl,
-                originalUrl: liveStatus.liveUrl,
-                title: liveStatus.title
-            });
-        } else {
-            res.json({
-                success: true,
-                message: 'Cache refreshed - Channel is not live',
-                isLive: false
+        if (!channel) {
+            return res.status(400).json({
+                success: false,
+                error: 'Channel parameter is required'
             });
         }
+
+        let channelHandle = channel.trim();
+        if (!channelHandle.startsWith('@')) {
+            channelHandle = `@${channelHandle}`;
+        }
+
+        const contentType = type || 'live';
+        const cacheKey = `${channelHandle}_${contentType}`;
+
+        console.log(`🔄 Manual refresh requested for ${channelHandle} (${contentType}) - clearing cache...`);
+        
+        // Clear cache for this channel and content type
+        globalCache.delete(cacheKey);
+
+        // Make a fresh request to the main API endpoint
+        const protocol = req.secure ? 'https' : 'http';
+        const host = req.get('host');
+        const apiUrl = `${protocol}://${host}/api/live-link?channel=${encodeURIComponent(channelHandle)}&type=${contentType}`;
+        
+        try {
+            const response = await axios.get(apiUrl);
+            const data = response.data;
+            
+            res.json({
+                success: true,
+                message: `Cache refreshed for ${channelHandle} (${contentType})`,
+                ...data
+            });
+        } catch (apiError) {
+            // Fallback: manually call the function
+            console.log('Internal API call failed, using direct function call');
+            
+            let result = {};
+            switch (contentType) {
+                case 'live':
+                    const liveStatus = await checkIfChannelIsLive(channelHandle);
+                    if (liveStatus.isLive && liveStatus.liveUrl) {
+                        const shortenerResult = await shortenUrl(liveStatus.liveUrl);
+                        result = {
+                            success: true,
+                            isLive: true,
+                            hasContent: true,
+                            shorturl: shortenerResult.shorturl,
+                            originalUrl: liveStatus.liveUrl,
+                            title: liveStatus.title,
+                            thumbnail: liveStatus.thumbnail,
+                            shortenerService: shortenerResult.service,
+                            method: liveStatus.method
+                        };
+                    } else {
+                        result = {
+                            success: true,
+                            isLive: false,
+                            hasContent: false,
+                            message: `${channelHandle} is not currently live`
+                        };
+                    }
+                    break;
+                case 'videos':
+                    const videoResult = await getLatestVideos(channelHandle, 10);
+                    result = {
+                        success: videoResult.success,
+                        hasContent: videoResult.success && videoResult.videos.length > 0,
+                        videos: videoResult.videos || [],
+                        contentType: 'videos'
+                    };
+                    break;
+                case 'shorts':
+                    const shortResult = await getLatestShorts(channelHandle, 10);
+                    result = {
+                        success: shortResult.success,
+                        hasContent: shortResult.success && shortResult.shorts.length > 0,
+                        shorts: shortResult.shorts || [],
+                        contentType: 'shorts'
+                    };
+                    break;
+            }
+            
+            res.json({
+                success: true,
+                message: `Cache refreshed for ${channelHandle} (${contentType})`,
+                channel: channelHandle,
+                channelUrl: `https://www.youtube.com/${channelHandle}`,
+                lastChecked: new Date().toISOString(),
+                ...result
+            });
+        }
+        
     } catch (error) {
         res.status(500).json({
             success: false,
@@ -855,47 +1419,213 @@ app.post('/api/refresh', async (req, res) => {
         });
     }
 });
+//discord message
+function formatDiscordMessage(data) {
+    const baseEmbed = {
+        color: 0x5865F2,
+        footer: { text: "YouTube Monitor Pro" },
+        timestamp: new Date().toISOString()
+    };
 
+    switch (data.event) {
+        case 'stream_started':
+            return {
+                embeds: [{
+                    ...baseEmbed,
+                    title: `🔴 ${data.title || 'Live Now!'}`,
+                    description: `${data.channelHandle} is now live on YouTube!\n\n[Watch Here](${data.shorturl})\n\n[Copy Link](${data.shorturl})`,
+                    url: data.shorturl,
+                    color: 0xFF0000,
+                    thumbnail: {
+                        url: data.thumbnail || `https://img.youtube.com/vi/${data.videoId}/default.jpg`
+                    },
+                    fields: [
+                        {
+                            name: "Channel",
+                            value: `[${data.channelHandle}](${data.channelUrl})`,
+                            inline: true
+                        },
+                        {
+                            name: "Published",
+                            value: data.publishedAt || 'Recently',
+                            inline: true
+                        },
+                        {
+                            name: "Short Link",
+                            value: `[${data.shorturl.replace(/^https?:\/\//, '')}](${data.shorturl})`,
+                            inline: true
+                        }
+                    ]
+                }]
+            };
+
+        case 'stream_ended':
+            return {
+                embeds: [{
+                    ...baseEmbed,
+                    title: '📴 Stream Ended',
+                    description: `${data.channelHandle}'s stream has ended.`,
+                    color: 0x808080,
+                    fields: [
+                        {
+                            name: "Channel",
+                            value: `[${data.channelHandle}](${data.channelUrl})`,
+                            inline: true
+                        }
+                    ]
+                }]
+            };
+
+        case 'new_video':
+            return {
+                embeds: [{
+                    ...baseEmbed,
+                    title: `📹 New Video: ${data.title}`,
+                    description: `${data.channelHandle} just uploaded a new video!\n\n[Watch Now](${data.shorturl})`,
+                    url: data.shorturl, // Use shortened URL
+                    color: 0x5865F2,
+                    thumbnail: {
+                        url: data.thumbnail || 'https://i.imgur.com/4M34hi2.png'
+                    },
+                    fields: [
+                        {
+                            name: "Channel",
+                            value: `[${data.channelHandle}](${data.channelUrl})`,
+                            inline: true
+                        },
+                        {
+                            name: "Published",
+                            value: data.publishedAt || 'Recently',
+                            inline: true
+                        },
+                        {
+                            name: "Views",
+                            value: data.viewCount || 'N/A',
+                            inline: true
+                        },
+                        {
+                            name: "Short Link",
+                            value: `[${data.shorturl.replace(/^https?:\/\//, '')}](${data.shorturl})`,
+                            inline: true
+                        }
+                    ]
+                }]
+            };
+
+        case 'new_short':
+            return {
+                embeds: [{
+                    ...baseEmbed,
+                    title: `🎬 New Short: ${data.title}`,
+                    description: `${data.channelHandle} just posted a new YouTube Short!\n\n[Watch Now](${data.shorturl})`,
+                    url: data.shorturl, // Use shortened URL
+                    color: 0xFF6B6B,
+                    thumbnail: {
+                        url: data.thumbnail || 'https://i.imgur.com/4M34hi2.png'
+                    },
+                    fields: [
+                        {
+                            name: "Channel",
+                            value: `[${data.channelHandle}](${data.channelUrl})`,
+                            inline: true
+                        },
+                        {
+                            name: "Published",
+                            value: data.publishedAt || 'Recently',
+                            inline: true
+                        },
+                        {
+                            name: "Views",
+                            value: data.viewCount || 'N/A',
+                            inline: true
+                        },
+                        {
+                            name: "Short Link",
+                            value: `[${data.shorturl.replace(/^https?:\/\//, '')}](${data.shorturl})`,
+                            inline: true
+                        }
+                    ]
+                }]
+            };
+
+        case 'monitoring_error':
+            return {
+                embeds: [{
+                    ...baseEmbed,
+                    title: '⚠️ Monitoring Error',
+                    description: `Too many errors while checking ${data.channelHandle}`,
+                    color: 0xFFA500,
+                    fields: [
+                        {
+                            name: 'Consecutive Errors',
+                            value: `${data.consecutiveErrors || 0}`,
+                            inline: true
+                        }
+                    ]
+                }]
+            };
+
+        case 'test':
+            return {
+                embeds: [{
+                    ...baseEmbed,
+                    title: '🧪 Test Webhook',
+                    description: 'This is a test notification from the YouTube monitor system.',
+                    color: 0x00FF00
+                }]
+            };
+
+        default:
+            return {
+                content: `📡 Event from ${data.channelHandle}: \`${data.event}\`\n${data.message || ''}`
+            };
+    }
+}
 // Graceful shutdown
 process.on('SIGTERM', () => {
     console.log('🛑 SIGTERM received, shutting down gracefully...');
-    stopMonitoring();
+    for (const instance of monitoringInstances.values()) {
+        instance.stop();
+    }
     process.exit(0);
 });
 
 process.on('SIGINT', () => {
     console.log('🛑 SIGINT received, shutting down gracefully...');
-    stopMonitoring();
+    for (const instance of monitoringInstances.values()) {
+        instance.stop();
+    }
     process.exit(0);
 });
 
 // Start server
 app.listen(PORT, () => {
-    console.log('🚀 YouTube Live Shortener API Started!');
-    console.log('─'.repeat(60));
+    console.log('🚀 YouTube Monitor Pro API Started!');
+    console.log('─'.repeat(80));
     console.log(`📍 Server: http://localhost:${PORT}`);
-    console.log(`📺 Channel: ${CHANNEL_HANDLE}`);
-    console.log(`🔗 API: http://localhost:${PORT}/api/live-link`);
+    console.log(`🔗 API: http://localhost:${PORT}/api/live-link?channel=@channelname&type=live`);
     console.log(`💚 Health: http://localhost:${PORT}/health`);
+    console.log(`📊 API Info: http://localhost:${PORT}/api/info`);
     console.log(`🔍 Monitoring: http://localhost:${PORT}/api/monitoring/status`);
-    console.log('─'.repeat(60));
+    console.log('─'.repeat(80));
     console.log('🔧 Configuration:');
     console.log(`   YouTube API: ${process.env.YOUTUBE_API_KEY ? '✅ Configured' : '⚠️  Using fallback'}`);
-    console.log(`   Webhook URL: ${WEBHOOK_URL ? '✅ Configured' : '⚠️  Not configured'}`);
-    console.log(`   Cache: ${CACHE_DURATION / 1000}s`);
-    console.log(`   Monitor Interval: ${MONITOR_INTERVAL / 1000}s`);
-    console.log('─'.repeat(60));
-    console.log('Ready to monitor live streams! 🎬');
-    console.log('💡 To start monitoring: POST /api/monitoring/start');
-    
+    console.log(`   Linktw API: ${process.env.LINKTW_API_KEY ? '✅ Configured' : '⚠️  Not configured'}`);
+    console.log(`   Cache Duration: ${CACHE_DURATION / 1000}s`);
+    console.log(`   Default Monitor Interval: ${DEFAULT_MONITOR_INTERVAL / 1000}s`);
+    console.log('─'.repeat(80));
+    console.log('🎯 Enhanced Features:');
+    console.log('   ✅ Live stream monitoring');
+    console.log('   ✅ Latest videos tracking');
+    console.log('   ✅ YouTube Shorts support');
+    console.log('   ✅ Multi-content type monitoring');
+    console.log('   ✅ Enhanced webhook notifications');
+    console.log('   ✅ Improved error handling');
+    console.log('   ✅ Better caching system');
+    console.log('─'.repeat(80));
+    console.log('Ready to monitor all YouTube content! 🎬📹🎭');
+    console.log('💡 Visit the web interface or use the enhanced API endpoints');
 });
 
-
-
 module.exports = app;
-
-
-
-
-
-
+       

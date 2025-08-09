@@ -1,8 +1,10 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-require('dotenv').config();
+const fs = require('fs').promises;
 const path = require('path');
+require('dotenv').config();
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -18,12 +20,64 @@ app.get('/', (req, res) => {
 // Configuration constants
 const CACHE_DURATION = 2 * 60 * 1000; // 2 minutes
 const DEFAULT_MONITOR_INTERVAL = 60 * 1000; // 1 minute default
+const DATA_FILE = path.join(__dirname, 'monitoring_data.json');
 
 // Dynamic monitoring state - supports multiple channels
 let monitoringInstances = new Map(); // channelHandle -> monitoring instance
 let globalCache = new Map(); // channelHandle -> cached data
+let persistentChannels = new Map(); // channelHandle -> config data
 
-// Monitoring instance structure
+// Data persistence functions
+async function saveMonitoringData() {
+    try {
+        const dataToSave = {};
+        const now = Date.now();
+        
+        for (const [channelHandle, instance] of monitoringInstances) {
+            if (instance.isMonitoring) {
+                dataToSave[channelHandle] = {
+                    channelHandle: instance.channelHandle,
+                    webhookUrl: instance.webhookUrl,
+                    interval: instance.interval,
+                    contentTypes: instance.contentTypes, // This is now safe
+                    lastKnownStates: instance.lastKnownStates,
+                    savedAt: now
+                };
+            }
+        }
+        
+        await fs.writeFile(DATA_FILE, JSON.stringify(dataToSave, null, 2));
+        console.log(`💾 Monitoring data saved for ${Object.keys(dataToSave).length} channels`);
+    } catch (error) {
+        console.error('❌ Error saving monitoring data:', error.message);
+    }
+}
+
+async function loadMonitoringData() {
+    try {
+        const data = await fs.readFile(DATA_FILE, 'utf8');
+        const savedData = JSON.parse(data);
+        
+        console.log('📂 Loaded monitoring data. Keys:', Object.keys(savedData));
+        
+        for (const [channelHandle, config] of Object.entries(savedData)) {
+            console.log(`🔍 Processing ${channelHandle}...`);
+            
+            // Debug: Log the timestamp
+            console.log('Timestamp (savedAt):', config.savedAt);
+            console.log('Is valid timestamp?', !isNaN(new Date(config.savedAt).getTime()));
+            
+            // Rest of your loading logic...
+        }
+    } catch (error) {
+        console.error('❌ Failed to load channels:', error);
+    }
+}
+
+// Auto-save monitoring data every 5 minutes
+setInterval(saveMonitoringData, 5 * 60 * 1000);
+
+// Monitoring instance structure (enhanced)
 class MonitoringInstance {
     constructor(channelHandle, webhookUrl, interval = DEFAULT_MONITOR_INTERVAL, contentTypes = ['live']) {
         this.channelHandle = channelHandle;
@@ -41,6 +95,7 @@ class MonitoringInstance {
         this.consecutiveErrors = 0;
         this.maxConsecutiveErrors = 5;
         this.lastChecked = null;
+        this.startedAt = null;
     }
 
     async start() {
@@ -51,12 +106,16 @@ class MonitoringInstance {
         console.log(`🚀 Starting monitoring for ${this.channelHandle} (${this.contentTypes.join(', ')})`);
         this.isMonitoring = true;
         this.consecutiveErrors = 0;
+        this.startedAt = Date.now();
         
         // Start monitoring immediately
         await this.checkContent();
         
         // Set up interval
         this.intervalId = setInterval(() => this.checkContent(), this.interval);
+        
+        // Save to persistent storage
+        await saveMonitoringData();
         
         return { success: true, message: 'Monitoring started successfully' };
     }
@@ -75,6 +134,7 @@ class MonitoringInstance {
         
         this.isMonitoring = false;
         this.consecutiveErrors = 0;
+        this.startedAt = null;
         
         return { success: true, message: 'Monitoring stopped successfully' };
     }
@@ -107,8 +167,10 @@ class MonitoringInstance {
                     consecutiveErrors: this.consecutiveErrors
                 });
                 
-                // Remove from monitoring instances
+                // Remove from monitoring instances and persistent storage
                 monitoringInstances.delete(this.channelHandle);
+                persistentChannels.delete(this.channelHandle);
+                await saveMonitoringData();
             }
         }
     }
@@ -169,6 +231,13 @@ class MonitoringInstance {
                 // Channel went OFFLINE
                 console.log(`📺 ${this.channelHandle} went offline`);
                 
+                // Update cache
+                globalCache.set(this.channelHandle, {
+                    ...globalCache.get(this.channelHandle) || {},
+                    isLive: false,
+                    lastChecked: Date.now()
+                });
+                
                 // Send webhook notification
                 await this.sendWebhookNotification({
                     event: 'stream_ended',
@@ -178,6 +247,7 @@ class MonitoringInstance {
             }
             
             this.lastKnownStates.live = liveStatus.isLive;
+            await saveMonitoringData(); // Save state changes
         }
     }
 
@@ -202,6 +272,7 @@ class MonitoringInstance {
                 });
                 
                 this.lastKnownStates.latestVideoId = latestVideo.videoId;
+                await saveMonitoringData(); // Save state changes
             }
         }
     }
@@ -227,6 +298,7 @@ class MonitoringInstance {
                 });
                 
                 this.lastKnownStates.latestShortId = latestShort.videoId;
+                await saveMonitoringData(); // Save state changes
             }
         }
     }
@@ -278,7 +350,9 @@ class MonitoringInstance {
             consecutiveErrors: this.consecutiveErrors,
             interval: this.interval,
             lastChecked: this.lastChecked ? new Date(this.lastChecked).toISOString() : null,
-            lastKnownLiveStatus: this.lastKnownStates.live // Fixed property name
+            startedAt: this.startedAt ? new Date(this.startedAt).toISOString() : null,
+            uptime: this.startedAt ? Math.floor((Date.now() - this.startedAt) / 1000) : 0,
+            lastKnownLiveStatus: this.lastKnownStates.live
         };
     }
 }
@@ -722,7 +796,7 @@ async function shortenUrl(longUrl) {
 function formatDiscordMessage(data) {
     const baseEmbed = {
         color: 0x5865F2,
-        footer: { text: "YouTube Monitor Pro" },
+        footer: { text: "YouTube Monitor Pro - Auto" },
         timestamp: new Date().toISOString()
     };
 
@@ -745,8 +819,134 @@ function formatDiscordMessage(data) {
                             inline: true
                         },
                         {
+                            name: "Status",
+                            value: "🔴 Live Now",
+                            inline: true
+                        },
+                        {
+                            name: "Short Link",
+                            value: `[${data.shorturl.replace(/^https?:\/\//, '')}](${data.shorturl})`,
+                            inline: true
+                        }
+                    ]
+                }]
+            };
+
+        case 'stream_ended':
+            return {
+                embeds: [{
+                    ...baseEmbed,
+                    title: '📴 Stream Ended',
+                    description: `${data.channelHandle}'s stream has ended.`,
+                    color: 0x808080,
+                    fields: [
+                        {
+                            name: "Channel",
+                            value: `[${data.channelHandle}](${data.channelUrl})`,
+                            inline: true
+                        },
+                        {
+                            name: "Status",
+                            value: "📴 Offline",
+                            inline: true
+                        }
+                    ]
+                }]
+            };
+
+        case 'new_video':
+            return {
+                embeds: [{
+                    ...baseEmbed,
+                    title: `📹 New Video: ${data.title}`,
+                    description: `${data.channelHandle} just uploaded a new video!\n\n[Watch Now](${data.shorturl})`,
+                    url: data.shorturl,
+                    color: 0x5865F2,
+                    thumbnail: {
+                        url: data.thumbnail || 'https://i.imgur.com/4M34hi2.png'
+                    },
+                    fields: [
+                        {
+                            name: "Channel",
+                            value: `[${data.channelHandle}](${data.channelUrl})`,
+                            inline: true
+                        },
+                        {
                             name: "Published",
                             value: data.publishedAt || 'Recently',
+                            inline: true
+                        },
+                        {
+                            name: "Views",
+                            value: data.viewCount || 'N/A',
+                            inline: true
+                        },
+                        {
+                            name: "Short Link",
+                            value: `[${data.shorturl.replace(/^https?:\/\//, '')}](${data.shorturl})`,
+                            inline: true
+                        }
+                    ]
+                }]
+            };
+
+        case 'new_short':
+            return {
+                embeds: [{
+                    ...baseEmbed,
+                    title: `🎬 New Short: ${data.title}`,
+                    description: `${data.channelHandle} just posted a new YouTube Short!\n\n[Watch Now](${data.shorturl})`,
+                    url: data.shorturl,
+                    color: 0xFF6B6B,
+                    thumbnail: {
+                        url: data.thumbnail || 'https://i.imgur.com/4M34hi2.png'
+                    },
+                    fields: [
+                        {
+                            name: "Channel",
+                            value: `[${data.channelHandle}](${data.channelUrl})`,
+                            inline: true
+                        },
+                        {
+                            name: "Published",
+                            value: data.publishedAt || 'Recently',
+                            inline: true
+                        },
+                        {
+                            name: "Views",
+                            value: data.viewCount || 'N/A',
+                            inline: true
+                        },
+                        {
+                            name: "Short Link",
+                            value: `[${data.shorturl.replace(/^https?:\/\//, '')}](${data.shorturl})`,
+                            inline: true
+                        }
+                    ]
+                }]
+            };
+
+        case 'monitoring_started':
+            return {
+                embeds: [{
+                    ...baseEmbed,
+                    title: '🚀 Monitoring Started',
+                    description: `Auto-monitoring has been started for ${data.channelHandle}.\n\nYou'll receive notifications for: ${data.contentTypes.join(', ')}`,
+                    color: 0x00FF00,
+                    fields: [
+                        {
+                            name: "Channel",
+                            value: `[${data.channelHandle}](${data.channelUrl})`,
+                            inline: true
+                        },
+                        {
+                            name: "Check Interval",
+                            value: `${data.interval / 1000}s`,
+                            inline: true
+                        },
+                        {
+                            name: "Content Types",
+                            value: data.contentTypes.join(', '),
                             inline: true
                         }
                     ]
@@ -758,12 +958,17 @@ function formatDiscordMessage(data) {
                 embeds: [{
                     ...baseEmbed,
                     title: '⚠️ Monitoring Error',
-                    description: `Too many errors while checking ${data.channelHandle}`,
+                    description: `Monitoring for ${data.channelHandle} has been stopped due to consecutive errors.`,
                     color: 0xFFA500,
                     fields: [
                         {
                             name: 'Consecutive Errors',
                             value: `${data.consecutiveErrors || 0}`,
+                            inline: true
+                        },
+                        {
+                            name: 'Action Required',
+                            value: 'Please restart monitoring manually',
                             inline: true
                         }
                     ]
@@ -776,7 +981,14 @@ function formatDiscordMessage(data) {
                     ...baseEmbed,
                     title: '🧪 Test Webhook',
                     description: 'This is a test notification from the YouTube monitor system.',
-                    color: 0x00FF00
+                    color: 0x00FF00,
+                    fields: [
+                        {
+                            name: "Status",
+                            value: "✅ Webhook working correctly",
+                            inline: true
+                        }
+                    ]
                 }]
             };
 
@@ -793,7 +1005,7 @@ function formatDiscordMessage(data) {
 app.get('/api/live-link', async (req, res) => {
     try {
         const channelInput = req.query.channel;
-        const contentType = req.query.type || 'live'; // live, videos, shorts, all
+        const contentType = req.query.type || 'live';
         
         if (!channelInput) {
             return res.status(400).json({
@@ -868,14 +1080,14 @@ app.get('/api/live-link', async (req, res) => {
                 }
                 break;
 
-                case 'videos':
+            case 'videos':
                 const videoResult = await getLatestVideos(channelHandle, 8);
                 if (videoResult.success && videoResult.videos.length > 0) {
                     // Shorten URLs for videos
                     for (let video of videoResult.videos) {
                         const shortenerResult = await shortenUrl(video.url);
-                        video.shorturl = shortenerResult.shorturl; // Changed from shortUrl to shorturl
-                        video.shortenerService = shortenerResult.service; // Add service info
+                        video.shorturl = shortenerResult.shorturl;
+                        video.shortenerService = shortenerResult.service;
                     }
                     result = {
                         success: true,
@@ -893,15 +1105,14 @@ app.get('/api/live-link', async (req, res) => {
                 }
                 break;
 
-                 // For shorts section (around line 430-450):
-                case 'shorts':
+            case 'shorts':
                 const shortResult = await getLatestShorts(channelHandle, 10);
                 if (shortResult.success && shortResult.shorts.length > 0) {
                     // Shorten URLs for shorts
                     for (let short of shortResult.shorts) {
                         const shortenerResult = await shortenUrl(short.url);
-                        short.shorturl = shortenerResult.shorturl; // Changed from shortUrl to shorturl
-                        short.shortenerService = shortenerResult.service; // Add service info
+                        short.shorturl = shortenerResult.shorturl;
+                        short.shortenerService = shortenerResult.service;
                     }
                     result = {
                         success: true,
@@ -909,15 +1120,15 @@ app.get('/api/live-link', async (req, res) => {
                         shorts: shortResult.shorts,
                         contentType: 'shorts'
                     };
-                    } else {
-                            result = {
-                                success: true,
-                                hasContent: false,
-                                shorts: [],
-                                message: `No recent shorts found for ${channelHandle}`
-                            };
-                        }
-                        break;
+                } else {
+                    result = {
+                        success: true,
+                        hasContent: false,
+                        shorts: [],
+                        message: `No recent shorts found for ${channelHandle}`
+                    };
+                }
+                break;
 
             case 'all':
                 // Get all content types
@@ -950,7 +1161,7 @@ app.get('/api/live-link', async (req, res) => {
                 if (videosResult.success && videosResult.videos.length > 0) {
                     for (let video of videosResult.videos) {
                         const shortenerResult = await shortenUrl(video.url);
-                        video.shorturl = shortenerResult.shorturl; // Changed from shortUrl to shorturl
+                        video.shorturl = shortenerResult.shorturl;
                         video.shortenerService = shortenerResult.service;
                     }
                     result.videos = videosResult.videos;
@@ -962,7 +1173,7 @@ app.get('/api/live-link', async (req, res) => {
                 if (shortsResult.success && shortsResult.shorts.length > 0) {
                     for (let short of shortsResult.shorts) {
                         const shortenerResult = await shortenUrl(short.url);
-                        short.shorturl = shortenerResult.shorturl; // Changed from shortUrl to shorturl
+                        short.shorturl = shortenerResult.shorturl;
                         short.shortenerService = shortenerResult.service;
                     }
                     result.shorts = shortsResult.shorts;
@@ -997,8 +1208,8 @@ app.get('/api/live-link', async (req, res) => {
     }
 });
 
-// Enhanced start monitoring endpoint
-app.post('/api/monitoring/start', async (req, res) => {
+// NEW: Auto-setup monitoring endpoint (one-time setup)
+app.post('/api/monitoring/setup', async (req, res) => {
     try {
         const { channel, webhook, interval, contentTypes } = req.body;
         
@@ -1039,7 +1250,7 @@ app.post('/api/monitoring/start', async (req, res) => {
         const validContentTypes = ['live', 'videos', 'shorts'];
         const selectedTypes = contentTypes && Array.isArray(contentTypes) 
             ? contentTypes.filter(type => validContentTypes.includes(type))
-            : ['live'];
+            : ['live', 'videos', 'shorts']; // Default to all types
 
         if (selectedTypes.length === 0) {
             return res.status(400).json({
@@ -1052,11 +1263,64 @@ app.post('/api/monitoring/start', async (req, res) => {
         if (monitoringInstances.has(channelHandle)) {
             const existingInstance = monitoringInstances.get(channelHandle);
             if (existingInstance.isMonitoring) {
-                return res.json({
-                    success: false,
-                    message: `Already monitoring ${channelHandle}`,
-                    status: existingInstance.getStatus()
-                });
+                // Update webhook URL and content types if different
+                if (existingInstance.webhookUrl !== webhook || 
+                    JSON.stringify(existingInstance.contentTypes.sort()) !== JSON.stringify(selectedTypes.sort())) {
+                    
+                    // Stop existing monitoring
+                    existingInstance.stop();
+                    
+                    // Create new instance with updated config
+                    const monitoringInterval = interval ? parseInt(interval) * 1000 : DEFAULT_MONITOR_INTERVAL;
+                    const newInstance = new MonitoringInstance(channelHandle, webhook, monitoringInterval, selectedTypes);
+                    
+                    // Start new monitoring
+                    const result = await newInstance.start();
+                    
+                    if (result.success) {
+                        monitoringInstances.set(channelHandle, newInstance);
+                        persistentChannels.set(channelHandle, {
+                            channelHandle,
+                            webhookUrl: webhook,
+                            interval: monitoringInterval,
+                            contentTypes: selectedTypes,
+                            setupAt: Date.now()
+                        });
+                        
+                        // Send setup confirmation webhook
+                        await newInstance.sendWebhookNotification({
+                            event: 'monitoring_started',
+                            contentTypes: selectedTypes,
+                            interval: monitoringInterval
+                        });
+                        
+                        return res.json({
+                            success: true,
+                            message: `Updated and restarted monitoring for ${channelHandle}`,
+                            config: {
+                                channel: channelHandle,
+                                interval: monitoringInterval / 1000,
+                                contentTypes: selectedTypes,
+                                webhookConfigured: true,
+                                action: 'updated'
+                            },
+                            status: newInstance.getStatus()
+                        });
+                    }
+                } else {
+                    return res.json({
+                        success: true,
+                        message: `Already monitoring ${channelHandle} with same configuration`,
+                        config: {
+                            channel: channelHandle,
+                            interval: existingInstance.interval / 1000,
+                            contentTypes: existingInstance.contentTypes,
+                            webhookConfigured: true,
+                            action: 'existing'
+                        },
+                        status: existingInstance.getStatus()
+                    });
+                }
             }
         }
 
@@ -1069,15 +1333,30 @@ app.post('/api/monitoring/start', async (req, res) => {
         
         if (result.success) {
             monitoringInstances.set(channelHandle, instance);
+            persistentChannels.set(channelHandle, {
+                channelHandle,
+                webhookUrl: webhook,
+                interval: monitoringInterval,
+                contentTypes: selectedTypes,
+                setupAt: Date.now()
+            });
+            
+            // Send setup confirmation webhook
+            await instance.sendWebhookNotification({
+                event: 'monitoring_started',
+                contentTypes: selectedTypes,
+                interval: monitoringInterval
+            });
             
             res.json({
                 success: true,
-                message: `Started monitoring ${channelHandle} for ${selectedTypes.join(', ')}`,
+                message: `Auto-monitoring setup complete for ${channelHandle}! You'll receive notifications for ${selectedTypes.join(', ')}.`,
                 config: {
                     channel: channelHandle,
                     interval: monitoringInterval / 1000,
                     contentTypes: selectedTypes,
-                    webhookConfigured: true
+                    webhookConfigured: true,
+                    action: 'created'
                 },
                 status: instance.getStatus()
             });
@@ -1096,8 +1375,17 @@ app.post('/api/monitoring/start', async (req, res) => {
     }
 });
 
-// Stop monitoring endpoint
-app.post('/api/monitoring/stop', (req, res) => {
+// Enhanced start monitoring endpoint (backwards compatibility)
+app.post('/api/monitoring/start', async (req, res) => {
+    // Redirect to setup endpoint for consistency
+    return app._router.handle(req, res, () => {
+        req.url = '/api/monitoring/setup';
+        app._router.handle(req, res);
+    });
+});
+
+// Enhanced stop monitoring endpoint
+app.post('/api/monitoring/stop', async (req, res) => {
     try {
         const { channel } = req.body;
         
@@ -1119,6 +1407,14 @@ app.post('/api/monitoring/stop', (req, res) => {
             const result = instance.stop();
             if (result.success) {
                 monitoringInstances.delete(channelHandle);
+                persistentChannels.delete(channelHandle);
+                await saveMonitoringData(); // Remove from persistent storage
+                
+                // Send stop notification
+                await instance.sendWebhookNotification({
+                    event: 'monitoring_stopped',
+                    message: 'Monitoring has been stopped manually'
+                });
             }
             
             res.json({
@@ -1130,18 +1426,31 @@ app.post('/api/monitoring/stop', (req, res) => {
         } else {
             // Stop all monitoring
             let stoppedCount = 0;
+            const stoppedChannels = [];
+            
             for (const [channelHandle, instance] of monitoringInstances) {
                 if (instance.isMonitoring) {
                     instance.stop();
+                    stoppedChannels.push(channelHandle);
                     stoppedCount++;
+                    
+                    // Send stop notification
+                    await instance.sendWebhookNotification({
+                        event: 'monitoring_stopped',
+                        message: 'All monitoring has been stopped'
+                    });
                 }
             }
+            
             monitoringInstances.clear();
+            persistentChannels.clear();
+            await saveMonitoringData(); // Clear persistent storage
             
             res.json({
                 success: true,
                 message: `Stopped monitoring ${stoppedCount} channels`,
-                stoppedChannels: stoppedCount
+                stoppedChannels: stoppedChannels,
+                stoppedCount: stoppedCount
             });
         }
     } catch (error) {
@@ -1152,7 +1461,65 @@ app.post('/api/monitoring/stop', (req, res) => {
     }
 });
 
-// Monitoring status endpoint
+// Get all saved channels endpoint
+app.get('/api/monitoring/channels', async (req, res) => {
+    try {
+        const channels = [];
+        
+        for (const [channelHandle, config] of persistentChannels) {
+            try {
+                const instance = monitoringInstances.get(channelHandle);
+                
+                // Safely handle setupAt timestamp
+                let setupAt;
+                try {
+                    setupAt = config.setupAt 
+                        ? new Date(config.setupAt).toISOString() 
+                        : new Date().toISOString();
+                } catch (e) {
+                    console.warn(`Invalid date for ${channelHandle}, using current time`);
+                    setupAt = new Date().toISOString();
+                }
+                
+                // Ensure contentTypes is always an array
+                const contentTypes = Array.isArray(config.contentTypes) 
+                    ? config.contentTypes 
+                    : ['live']; // Default value
+                
+                channels.push({
+                    channelHandle: config.channelHandle || channelHandle,
+                    channelUrl: `https://www.youtube.com/${config.channelHandle || channelHandle}`,
+                    webhookConfigured: !!config.webhookUrl,
+                    contentTypes: contentTypes,
+                    interval: config.interval ? config.interval / 1000 : DEFAULT_MONITOR_INTERVAL / 1000,
+                    setupAt: setupAt,
+                    isCurrentlyMonitoring: instance ? instance.isMonitoring : false,
+                    status: instance ? instance.getStatus() : null
+                });
+            } catch (error) {
+                console.error(`Error processing channel ${channelHandle}:`, error);
+                // Continue with next channel
+                continue;
+            }
+        }
+        
+        res.json({
+            success: true,
+            totalChannels: channels.length,
+            activeChannels: channels.filter(c => c.isCurrentlyMonitoring).length,
+            channels: channels
+        });
+    } catch (error) {
+        console.error('Error in /api/monitoring/channels:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
+// Monitoring status endpoint (enhanced)
 app.get('/api/monitoring/status', (req, res) => {
     try {
         const { channel } = req.query;
@@ -1165,17 +1532,22 @@ app.get('/api/monitoring/status', (req, res) => {
             }
             
             const instance = monitoringInstances.get(channelHandle);
-            if (!instance) {
+            const persistentConfig = persistentChannels.get(channelHandle);
+            
+            if (!instance && !persistentConfig) {
                 return res.json({
                     success: false,
-                    message: `Not monitoring ${channelHandle}`
+                    message: `Channel ${channelHandle} is not configured for monitoring`
                 });
             }
             
             res.json({
                 success: true,
-                monitoring: instance.getStatus(),
-                cache: globalCache.get(channelHandle) || null
+                monitoring: instance ? instance.getStatus() : null,
+                persistent: persistentConfig || null,
+                cache: globalCache.get(channelHandle) || null,
+                isConfigured: !!persistentConfig,
+                isActive: instance ? instance.isMonitoring : false
             });
         } else {
             // Get status for all monitored channels
@@ -1183,15 +1555,36 @@ app.get('/api/monitoring/status', (req, res) => {
             for (const [channelHandle, instance] of monitoringInstances) {
                 allStatuses.push({
                     ...instance.getStatus(),
-                    cache: globalCache.get(channelHandle) || null
+                    cache: globalCache.get(channelHandle) || null,
+                    persistent: persistentChannels.get(channelHandle) || null
                 });
+            }
+            
+            // Also include non-active but configured channels
+            for (const [channelHandle, config] of persistentChannels) {
+                if (!monitoringInstances.has(channelHandle)) {
+                    allStatuses.push({
+                        channelHandle: config.channelHandle,
+                        channelUrl: `https://www.youtube.com/${config.channelHandle}`,
+                        webhookUrl: config.webhookUrl ? config.webhookUrl.replace(/\/[^\/]*$/, '/***') : null,
+                        isMonitoring: false,
+                        contentTypes: config.contentTypes,
+                        interval: config.interval,
+                        setupAt: new Date(config.setupAt).toISOString(),
+                        persistent: config,
+                        cache: null,
+                        status: 'configured_but_stopped'
+                    });
+                }
             }
             
             res.json({
                 success: true,
                 totalChannels: allStatuses.length,
                 activeChannels: allStatuses.filter(s => s.isMonitoring).length,
-                monitoring: allStatuses
+                configuredChannels: persistentChannels.size,
+                monitoring: allStatuses,
+                serverUptime: Math.floor(process.uptime())
             });
         }
     } catch (error) {
@@ -1239,41 +1632,120 @@ app.post('/api/monitoring/test-webhook', async (req, res) => {
     }
 });
 
-// Health check endpoint
+// Restart specific channel monitoring endpoint
+app.post('/api/monitoring/restart', async (req, res) => {
+    try {
+        const { channel } = req.body;
+        
+        if (!channel) {
+            return res.status(400).json({
+                success: false,
+                error: 'Channel parameter is required'
+            });
+        }
+
+        let channelHandle = channel.trim();
+        if (!channelHandle.startsWith('@')) {
+            channelHandle = `@${channelHandle}`;
+        }
+
+        const persistentConfig = persistentChannels.get(channelHandle);
+        if (!persistentConfig) {
+            return res.json({
+                success: false,
+                message: `No saved configuration found for ${channelHandle}. Please setup monitoring first.`
+            });
+        }
+
+        // Stop existing monitoring if running
+        const existingInstance = monitoringInstances.get(channelHandle);
+        if (existingInstance && existingInstance.isMonitoring) {
+            existingInstance.stop();
+        }
+
+        // Create new instance from saved config
+        const instance = new MonitoringInstance(
+            persistentConfig.channelHandle,
+            persistentConfig.webhookUrl,
+            persistentConfig.interval,
+            persistentConfig.contentTypes
+        );
+
+        // Start monitoring
+        const result = await instance.start();
+        
+        if (result.success) {
+            monitoringInstances.set(channelHandle, instance);
+            
+            res.json({
+                success: true,
+                message: `Restarted monitoring for ${channelHandle}`,
+                config: {
+                    channel: channelHandle,
+                    interval: persistentConfig.interval / 1000,
+                    contentTypes: persistentConfig.contentTypes,
+                    webhookConfigured: true
+                },
+                status: instance.getStatus()
+            });
+        } else {
+            res.json({
+                success: false,
+                message: result.message
+            });
+        }
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Health check endpoint (enhanced)
 app.get('/health', (req, res) => {
     const activeChannels = Array.from(monitoringInstances.values()).filter(i => i.isMonitoring);
     
     res.json({
         status: 'OK',
         service: 'YouTube Monitor Pro API',
-        version: '2.1.0',
+        version: '2.2.0',
         timestamp: new Date().toISOString(),
         uptime: Math.floor(process.uptime()),
         monitoring: {
             totalChannels: monitoringInstances.size,
             activeChannels: activeChannels.length,
+            configuredChannels: persistentChannels.size,
             channels: activeChannels.map(i => ({
                 handle: i.channelHandle,
-                contentTypes: i.contentTypes
+                contentTypes: i.contentTypes,
+                uptime: i.startedAt ? Math.floor((Date.now() - i.startedAt) / 1000) : 0
             }))
         },
         cache: {
             totalEntries: globalCache.size,
             channels: Array.from(globalCache.keys())
+        },
+        persistence: {
+            dataFile: DATA_FILE,
+            autoSaveEnabled: true,
+            lastSaved: 'Auto-saved every 5 minutes'
         }
     });
 });
 
-// API info endpoint
+// API info endpoint (enhanced)
 app.get('/api/info', (req, res) => {
     res.json({
         success: true,
         service: {
             name: 'YouTube Monitor Pro',
-            version: '2.1.0',
-            description: 'Enhanced YouTube channel monitoring with support for live streams, videos, and shorts'
+            version: '2.2.0',
+            description: 'Enhanced YouTube channel monitoring with persistent auto-monitoring'
         },
         features: [
+            'Persistent monitoring (survives server restarts)',
+            'One-time setup with automatic notifications',
             'Live stream monitoring',
             'Latest videos tracking',
             'YouTube Shorts monitoring',
@@ -1284,16 +1756,20 @@ app.get('/api/info', (req, res) => {
             'Fallback detection methods',
             'Multi-channel support',
             'Real-time status monitoring',
-            'Enhanced error handling'
+            'Enhanced error handling',
+            'Auto-save monitoring configurations'
         ],
         endpoints: {
             'GET /api/live-link?channel=@channelname&type=live': 'Get live stream status and short URL',
             'GET /api/live-link?channel=@channelname&type=videos': 'Get latest videos',
             'GET /api/live-link?channel=@channelname&type=shorts': 'Get latest shorts',
             'GET /api/live-link?channel=@channelname&type=all': 'Get all content types',
-            'POST /api/monitoring/start': 'Start monitoring (supports contentTypes array)',
+            'POST /api/monitoring/setup': 'One-time setup for persistent monitoring',
+            'POST /api/monitoring/start': 'Start monitoring (alias for setup)',
             'POST /api/monitoring/stop': 'Stop monitoring',
+            'POST /api/monitoring/restart': 'Restart monitoring from saved config',
             'GET /api/monitoring/status': 'Get monitoring status',
+            'GET /api/monitoring/channels': 'Get all configured channels',
             'POST /api/monitoring/test-webhook': 'Test webhook notification',
             'GET /health': 'Health check and system status',
             'GET /api/info': 'API information and documentation'
@@ -1308,7 +1784,9 @@ app.get('/api/info', (req, res) => {
             youtubeApiSupported: !!process.env.YOUTUBE_API_KEY,
             linktwApiSupported: !!process.env.LINKTW_API_KEY,
             cacheDuration: CACHE_DURATION / 1000,
-            defaultMonitorInterval: DEFAULT_MONITOR_INTERVAL / 1000
+            defaultMonitorInterval: DEFAULT_MONITOR_INTERVAL / 1000,
+            persistentStorage: true,
+            autoSaveInterval: 300 // 5 minutes
         }
     });
 });
@@ -1419,213 +1897,99 @@ app.post('/api/refresh', async (req, res) => {
         });
     }
 });
-//discord message
-function formatDiscordMessage(data) {
-    const baseEmbed = {
-        color: 0x5865F2,
-        footer: { text: "YouTube Monitor Pro" },
-        timestamp: new Date().toISOString()
-    };
 
-    switch (data.event) {
-        case 'stream_started':
-            return {
-                embeds: [{
-                    ...baseEmbed,
-                    title: `🔴 ${data.title || 'Live Now!'}`,
-                    description: `${data.channelHandle} is now live on YouTube!\n\n[Watch Here](${data.shorturl})\n\n[Copy Link](${data.shorturl})`,
-                    url: data.shorturl,
-                    color: 0xFF0000,
-                    thumbnail: {
-                        url: data.thumbnail || `https://img.youtube.com/vi/${data.videoId}/default.jpg`
-                    },
-                    fields: [
-                        {
-                            name: "Channel",
-                            value: `[${data.channelHandle}](${data.channelUrl})`,
-                            inline: true
-                        },
-                        {
-                            name: "Published",
-                            value: data.publishedAt || 'Recently',
-                            inline: true
-                        },
-                        {
-                            name: "Short Link",
-                            value: `[${data.shorturl.replace(/^https?:\/\//, '')}](${data.shorturl})`,
-                            inline: true
-                        }
-                    ]
-                }]
-            };
-
-        case 'stream_ended':
-            return {
-                embeds: [{
-                    ...baseEmbed,
-                    title: '📴 Stream Ended',
-                    description: `${data.channelHandle}'s stream has ended.`,
-                    color: 0x808080,
-                    fields: [
-                        {
-                            name: "Channel",
-                            value: `[${data.channelHandle}](${data.channelUrl})`,
-                            inline: true
-                        }
-                    ]
-                }]
-            };
-
-        case 'new_video':
-            return {
-                embeds: [{
-                    ...baseEmbed,
-                    title: `📹 New Video: ${data.title}`,
-                    description: `${data.channelHandle} just uploaded a new video!\n\n[Watch Now](${data.shorturl})`,
-                    url: data.shorturl, // Use shortened URL
-                    color: 0x5865F2,
-                    thumbnail: {
-                        url: data.thumbnail || 'https://i.imgur.com/4M34hi2.png'
-                    },
-                    fields: [
-                        {
-                            name: "Channel",
-                            value: `[${data.channelHandle}](${data.channelUrl})`,
-                            inline: true
-                        },
-                        {
-                            name: "Published",
-                            value: data.publishedAt || 'Recently',
-                            inline: true
-                        },
-                        {
-                            name: "Views",
-                            value: data.viewCount || 'N/A',
-                            inline: true
-                        },
-                        {
-                            name: "Short Link",
-                            value: `[${data.shorturl.replace(/^https?:\/\//, '')}](${data.shorturl})`,
-                            inline: true
-                        }
-                    ]
-                }]
-            };
-
-        case 'new_short':
-            return {
-                embeds: [{
-                    ...baseEmbed,
-                    title: `🎬 New Short: ${data.title}`,
-                    description: `${data.channelHandle} just posted a new YouTube Short!\n\n[Watch Now](${data.shorturl})`,
-                    url: data.shorturl, // Use shortened URL
-                    color: 0xFF6B6B,
-                    thumbnail: {
-                        url: data.thumbnail || 'https://i.imgur.com/4M34hi2.png'
-                    },
-                    fields: [
-                        {
-                            name: "Channel",
-                            value: `[${data.channelHandle}](${data.channelUrl})`,
-                            inline: true
-                        },
-                        {
-                            name: "Published",
-                            value: data.publishedAt || 'Recently',
-                            inline: true
-                        },
-                        {
-                            name: "Views",
-                            value: data.viewCount || 'N/A',
-                            inline: true
-                        },
-                        {
-                            name: "Short Link",
-                            value: `[${data.shorturl.replace(/^https?:\/\//, '')}](${data.shorturl})`,
-                            inline: true
-                        }
-                    ]
-                }]
-            };
-
-        case 'monitoring_error':
-            return {
-                embeds: [{
-                    ...baseEmbed,
-                    title: '⚠️ Monitoring Error',
-                    description: `Too many errors while checking ${data.channelHandle}`,
-                    color: 0xFFA500,
-                    fields: [
-                        {
-                            name: 'Consecutive Errors',
-                            value: `${data.consecutiveErrors || 0}`,
-                            inline: true
-                        }
-                    ]
-                }]
-            };
-
-        case 'test':
-            return {
-                embeds: [{
-                    ...baseEmbed,
-                    title: '🧪 Test Webhook',
-                    description: 'This is a test notification from the YouTube monitor system.',
-                    color: 0x00FF00
-                }]
-            };
-
-        default:
-            return {
-                content: `📡 Event from ${data.channelHandle}: \`${data.event}\`\n${data.message || ''}`
-            };
-    }
+// Initialize server with auto-load
+async function initializeServer() {
+    console.log('🔄 Initializing YouTube Monitor Pro...');
+    
+    // Load saved monitoring configurations
+    await loadMonitoringData();
+    
+    // Start the server
+    app.listen(PORT, () => {
+        console.log('🚀 YouTube Monitor Pro API Started!');
+        console.log('─'.repeat(80));
+        console.log(`📍 Server: http://localhost:${PORT}`);
+        console.log(`🔗 API: http://localhost:${PORT}/api/live-link?channel=@channelname&type=live`);
+        console.log(`💚 Health: http://localhost:${PORT}/health`);
+        console.log(`📊 API Info: http://localhost:${PORT}/api/info`);
+        console.log(`🔍 Monitoring: http://localhost:${PORT}/api/monitoring/status`);
+        console.log(`⚙️  Setup: http://localhost:${PORT}/api/monitoring/setup`);
+        console.log('─'.repeat(80));
+        console.log('🔧 Configuration:');
+        console.log(`   YouTube API: ${process.env.YOUTUBE_API_KEY ? '✅ Configured' : '⚠️  Using fallback'}`);
+        console.log(`   Linktw API: ${process.env.LINKTW_API_KEY ? '✅ Configured' : '⚠️  Not configured'}`);
+        console.log(`   Cache Duration: ${CACHE_DURATION / 1000}s`);
+        console.log(`   Default Monitor Interval: ${DEFAULT_MONITOR_INTERVAL / 1000}s`);
+        console.log(`   Persistent Storage: ✅ Enabled`);
+        console.log(`   Auto-Save Interval: 5 minutes`);
+        console.log('─'.repeat(80));
+        console.log('🎯 Enhanced Features:');
+        console.log('   ✅ Persistent monitoring (survives restarts)');
+        console.log('   ✅ One-time setup with auto-notifications');
+        console.log('   ✅ Live stream monitoring');
+        console.log('   ✅ Latest videos tracking');
+        console.log('   ✅ YouTube Shorts support');
+        console.log('   ✅ Multi-content type monitoring');
+        console.log('   ✅ Enhanced webhook notifications');
+        console.log('   ✅ Improved error handling');
+        console.log('   ✅ Better caching system');
+        console.log('   ✅ Auto-resume monitoring');
+        console.log('─'.repeat(80));
+        
+        const activeMonitors = Array.from(monitoringInstances.values()).filter(i => i.isMonitoring);
+        console.log(`📡 Monitoring Status:`);
+        console.log(`   Active Channels: ${activeMonitors.length}`);
+        console.log(`   Configured Channels: ${persistentChannels.size}`);
+        
+        if (activeMonitors.length > 0) {
+            console.log(`   Monitored Channels:`);
+            activeMonitors.forEach(instance => {
+                console.log(`     - ${instance.channelHandle} (${instance.contentTypes.join(', ')})`);
+            });
+        }
+        
+        console.log('─'.repeat(80));
+        console.log('Ready for persistent auto-monitoring! 🎬📹🎭');
+        console.log('💡 Use the setup endpoint to configure one-time auto-monitoring');
+    });
 }
-// Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('🛑 SIGTERM received, shutting down gracefully...');
+
+// Graceful shutdown with data saving
+async function gracefulShutdown(signal) {
+    console.log(`🛑 ${signal} received, shutting down gracefully...`);
+    
+    // Save monitoring data before shutdown
+    await saveMonitoringData();
+    
+    // Stop all monitoring instances
     for (const instance of monitoringInstances.values()) {
         instance.stop();
     }
+    
+    console.log('✅ Shutdown complete');
     process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Auto-save on uncaught exceptions
+process.on('uncaughtException', async (error) => {
+    console.error('❌ Uncaught Exception:', error);
+    await saveMonitoringData();
+    process.exit(1);
 });
 
-process.on('SIGINT', () => {
-    console.log('🛑 SIGINT received, shutting down gracefully...');
-    for (const instance of monitoringInstances.values()) {
-        instance.stop();
-    }
-    process.exit(0);
+process.on('unhandledRejection', async (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+    await saveMonitoringData();
 });
 
-// Start server
-app.listen(PORT, () => {
-    console.log('🚀 YouTube Monitor Pro API Started!');
-    console.log('─'.repeat(80));
-    console.log(`📍 Server: http://localhost:${PORT}`);
-    console.log(`🔗 API: http://localhost:${PORT}/api/live-link?channel=@channelname&type=live`);
-    console.log(`💚 Health: http://localhost:${PORT}/health`);
-    console.log(`📊 API Info: http://localhost:${PORT}/api/info`);
-    console.log(`🔍 Monitoring: http://localhost:${PORT}/api/monitoring/status`);
-    console.log('─'.repeat(80));
-    console.log('🔧 Configuration:');
-    console.log(`   YouTube API: ${process.env.YOUTUBE_API_KEY ? '✅ Configured' : '⚠️  Using fallback'}`);
-    console.log(`   Linktw API: ${process.env.LINKTW_API_KEY ? '✅ Configured' : '⚠️  Not configured'}`);
-    console.log(`   Cache Duration: ${CACHE_DURATION / 1000}s`);
-    console.log(`   Default Monitor Interval: ${DEFAULT_MONITOR_INTERVAL / 1000}s`);
-    console.log('─'.repeat(80));
-    console.log('🎯 Enhanced Features:');
-    console.log('   ✅ Live stream monitoring');
-    console.log('   ✅ Latest videos tracking');
-    console.log('   ✅ YouTube Shorts support');
-    console.log('   ✅ Multi-content type monitoring');
-    console.log('   ✅ Enhanced webhook notifications');
-    console.log('   ✅ Improved error handling');
-    console.log('   ✅ Better caching system');
-    console.log('─'.repeat(80));
-    console.log('Ready to monitor all YouTube content! 🎬📹🎭');
-    console.log('💡 Visit the web interface or use the enhanced API endpoints');
+// Initialize the server
+initializeServer().catch(error => {
+    console.error('❌ Failed to initialize server:', error);
+    process.exit(1);
 });
 
 module.exports = app;
-       

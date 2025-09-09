@@ -30,9 +30,10 @@
   "author": "YouTube Monitor Pro",
   "license": "MIT",
   "engines": {
-    "node": "20.x"
+    "node": "22.x"
   }
 }
+
 
 
 

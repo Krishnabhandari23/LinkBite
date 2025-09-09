@@ -1,6 +1,7 @@
 {
   "name": "youtube-monitor-pro",
   "version": "2.3.0",
+  "type": "module",
   "description": "Enhanced YouTube channel monitoring with persistent database storage",
   "main": "server.cjs",
   "scripts": {
@@ -33,6 +34,7 @@
     "node": "22.x"
   }
 }
+
 
 
 

@@ -29,7 +29,7 @@ app.use(cors());
 app.use(express.json());
 
 // ✅ Serve static files from public folder
-app.use(express.static(path.join(__dirname, 'public')));
+app.use('/static', express.static(path.join(__dirname, 'public')));
 
 // Configuration constants
 const CACHE_DURATION = parseInt(process.env.CACHE_DURATION) || 2 * 60 * 1000; // 2 minutes
@@ -1857,3 +1857,4 @@ initializeServer().catch(error => {
 });
 
 export default app;
+

@@ -2,8 +2,13 @@ import express from 'express';
 import axios from 'axios';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 import {
     saveChannelConfiguration,
@@ -23,6 +28,9 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// ✅ Serve static files from public folder
+app.use(express.static(path.join(__dirname, 'public')));
+
 // Configuration constants
 const CACHE_DURATION = parseInt(process.env.CACHE_DURATION) || 2 * 60 * 1000; // 2 minutes
 const DEFAULT_MONITOR_INTERVAL = parseInt(process.env.DEFAULT_MONITOR_INTERVAL) || 60 * 1000; // 1 minute
@@ -32,13 +40,22 @@ let monitoringInstances = new Map(); // channelHandle -> monitoring instance
 let globalCache = new Map(); // channelHandle -> cached data
 let persistentChannels = new Map(); // channelHandle -> config data
 
-
-// Add these routes BEFORE your existing API routes:
+// ✅ Updated root route to serve index.html
 app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/health', (req, res) => {
+    res.json({ success: true, status: 'healthy', timestamp: new Date().toISOString() });
+});
+
+// ✅ New API info route
+app.get('/api/info', (req, res) => {
     res.json({
         success: true,
-        message: '🚀 YouTube Monitor Pro API is running!',
+        name: 'YouTube Monitor Pro',
         version: '2.3.0',
+        description: 'YouTube channel monitoring with persistent database storage',
         endpoints: [
             'GET /health - Health check',
             'GET /api/info - API information',
@@ -46,13 +63,17 @@ app.get('/', (req, res) => {
             'POST /api/monitoring/setup - Setup monitoring',
             'GET /api/monitoring/channels - List channels',
             'GET /api/monitoring/status - System status'
+        ],
+        features: [
+            'Live stream detection',
+            'New video notifications',
+            'YouTube Shorts monitoring',
+            'Discord webhook notifications',
+            'Persistent Supabase storage'
         ]
     });
 });
 
-app.get('/health', (req, res) => {
-    res.json({ success: true, status: 'healthy', timestamp: new Date().toISOString() });
-});
 // Monitoring instance structure (enhanced)
 class MonitoringInstance {
     constructor(channelHandle, webhookUrl, interval = DEFAULT_MONITOR_INTERVAL, contentTypes = ['live']) {
@@ -1722,7 +1743,6 @@ app.post('/api/monitoring/test-webhook', async (req, res) => {
     }
 });
 
-
 // CRITICAL FIX: Also update the initialization to load from database
 async function initializeServer() {
     console.log('🔄 Initializing YouTube Monitor Pro with Database...');
@@ -1837,6 +1857,3 @@ initializeServer().catch(error => {
 });
 
 export default app;
-
-
-

@@ -8,7 +8,7 @@ const {
     saveChannelConfiguration,
     updateChannelStates,
     removeChannelFromDatabase
-} = require('./database');
+} = require('./database.cjs');
 
 // Add database functions
 const {
@@ -17,7 +17,7 @@ const {
     logMonitoringEvent,
     getAllChannelsFromDatabase,
     testDatabaseConnection
-} = require('./database');
+} = require('./database.cjs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1948,3 +1948,4 @@ initializeServer().catch(error => {
 });
 
 module.exports = app;
+

@@ -32,6 +32,27 @@ let monitoringInstances = new Map(); // channelHandle -> monitoring instance
 let globalCache = new Map(); // channelHandle -> cached data
 let persistentChannels = new Map(); // channelHandle -> config data
 
+
+// Add these routes BEFORE your existing API routes:
+app.get('/', (req, res) => {
+    res.json({
+        success: true,
+        message: '🚀 YouTube Monitor Pro API is running!',
+        version: '2.3.0',
+        endpoints: [
+            'GET /health - Health check',
+            'GET /api/info - API information',
+            'GET /api/live-link - Check channel status',
+            'POST /api/monitoring/setup - Setup monitoring',
+            'GET /api/monitoring/channels - List channels',
+            'GET /api/monitoring/status - System status'
+        ]
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.json({ success: true, status: 'healthy', timestamp: new Date().toISOString() });
+});
 // Monitoring instance structure (enhanced)
 class MonitoringInstance {
     constructor(channelHandle, webhookUrl, interval = DEFAULT_MONITOR_INTERVAL, contentTypes = ['live']) {
@@ -1816,5 +1837,6 @@ initializeServer().catch(error => {
 });
 
 export default app;
+
 
 

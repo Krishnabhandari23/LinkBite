@@ -1,5 +1,5 @@
 import express from 'express';
-const axios = require('axios');
+import axios from 'axios';
 import cors from 'cors';
 import dotenv from 'dotenv';
 
@@ -1816,4 +1816,5 @@ initializeServer().catch(error => {
 });
 
 export default app;
+
 

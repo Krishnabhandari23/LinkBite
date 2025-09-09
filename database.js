@@ -256,7 +256,7 @@ async function initializeDatabase() {
   }
 }
 
-module.exports = {
+export {
   testDatabaseConnection,
   saveMonitoringData,
   loadMonitoringData,
@@ -268,6 +268,7 @@ module.exports = {
   initializeDatabase,
   supabase
 };
+
 
 
 

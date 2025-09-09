@@ -1,4 +1,5 @@
-import { createClient } from '@supabase/supabase-js';
+const { createClient } = require('@supabase/supabase-js');
+
 require('dotenv').config();
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -267,4 +268,5 @@ module.exports = {
   initializeDatabase,
   supabase
 };
+
 

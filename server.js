@@ -31,6 +31,11 @@ app.use(express.json());
 // ✅ Serve static files from public folder
 app.use('/static', express.static(path.join(__dirname, 'public')));
 
+// ✅ FIXED: Add missing global variables that were causing ReferenceError
+let monitoringConfigs = {}; // channelHandle -> config object
+let monitoringStatus = {}; // channelHandle -> status tracking  
+let activeMonitors = new Map(); // channelHandle -> intervalId for active monitoring
+
 // Configuration constants
 const CACHE_DURATION = parseInt(process.env.CACHE_DURATION) || 2 * 60 * 1000; // 2 minutes
 const DEFAULT_MONITOR_INTERVAL = parseInt(process.env.DEFAULT_MONITOR_INTERVAL) || 60 * 1000; // 1 minute
@@ -2009,111 +2014,75 @@ app.post('/api/monitoring/test-webhook', async (req, res) => {
 });
 
 // CRITICAL FIX: Also update the initialization to load from database
-async function initializeServer() {
-    console.log('🔄 Initializing YouTube Monitor Pro with Database...');
-
-    // Test database connection first
-    console.log('🔍 Testing database connection...');
-    const dbTest = await testDatabaseConnection();
-    if (!dbTest.success) {
-        console.error('❌ Database connection failed. Please check your Supabase configuration.');
-        console.error('Make sure SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are set correctly.');
-        console.error('Also run the SQL setup script in Supabase.');
-        console.error('Error details:', dbTest.error);
-        // Don't exit - allow server to run without database
-        console.log('⚠️ Continuing without database - monitoring will not persist');
-    } else {
-        console.log('✅ Database connection successful');
-
-        // Load saved monitoring configurations from database
-        console.log('📂 Loading monitoring configurations from database...');
-        const loadResult = await loadMonitoringData();
-        if (loadResult.success && loadResult.channels && loadResult.channels.length > 0) {
-            console.log(`📊 Found ${loadResult.channels.length} saved configurations`);
-
-            // Restore monitoring instances from database
-            for (const channelConfig of loadResult.channels) {
-                try {
-                    console.log(`🔄 Restoring monitoring for ${channelConfig.channelHandle}...`);
-
-                    const instance = new MonitoringInstance(
-                        channelConfig.channelHandle,
-                        channelConfig.webhookUrl,
-                        channelConfig.interval,
-                        channelConfig.contentTypes
-                    );
-
-                    // Restore last known states
-                    if (channelConfig.lastKnownStates) {
-                        instance.lastKnownStates = channelConfig.lastKnownStates;
-                    }
-
-                    // Start monitoring (this will NOT re-save to database since it already exists)
-                    const result = await instance.start();
-                    if (result.success) {
-                        monitoringInstances.set(channelConfig.channelHandle, instance);
-                        persistentChannels.set(channelConfig.channelHandle, {
-                            channelHandle: channelConfig.channelHandle,
-                            webhookUrl: channelConfig.webhookUrl,
-                            interval: channelConfig.interval,
-                            contentTypes: channelConfig.contentTypes,
-                            setupAt: channelConfig.setupAt
-                        });
-
-                        console.log(`✅ Restored monitoring for ${channelConfig.channelHandle}`);
-                    } else {
-                        console.error(`❌ Failed to restore monitoring for ${channelConfig.channelHandle}:`, result.message);
-                    }
-                } catch (error) {
-                    console.error(`❌ Error restoring ${channelConfig.channelHandle}:`, error.message);
-                }
+// ✅ FIXED: Serverless initialization for Vercel
+async function initializeForVercel() {
+    console.log('🔄 Initializing YouTube Monitor Pro for Vercel...');
+    
+    try {
+        // Test database connection
+        console.log('🔍 Testing database connection...');
+        const dbTest = await testDatabaseConnection();
+        
+        if (dbTest.success) {
+            console.log('✅ Database connection successful');
+            
+            // Load saved monitoring configurations from database
+            console.log('📂 Loading monitoring configurations from database...');
+            const loadResult = await loadMonitoringData();
+            
+            if (loadResult.success && loadResult.channels && loadResult.channels.length > 0) {
+                console.log(`📊 Found ${loadResult.channels.length} saved configurations`);
+                
+                // Store configurations in global variables for health-check endpoint
+                loadResult.channels.forEach(channelConfig => {
+                    monitoringConfigs[channelConfig.channelHandle] = {
+                        webhookUrl: channelConfig.webhookUrl,
+                        interval: channelConfig.interval,
+                        contentTypes: channelConfig.contentTypes,
+                        channelUrl: `https://www.youtube.com/${channelConfig.channelHandle}`
+                    };
+                    
+                    monitoringStatus[channelConfig.channelHandle] = {
+                        lastChecked: null,
+                        consecutiveErrors: 0,
+                        uptime: 0,
+                        lastKnownLiveStatus: false,
+                        totalChecks: 0,
+                        totalErrors: 0
+                    };
+                    
+                    // Store in persistent channels map
+                    persistentChannels.set(channelConfig.channelHandle, {
+                        channelHandle: channelConfig.channelHandle,
+                        webhookUrl: channelConfig.webhookUrl,
+                        interval: channelConfig.interval,
+                        contentTypes: channelConfig.contentTypes,
+                        setupAt: channelConfig.setupAt
+                    });
+                });
+                
+                console.log(`✅ Loaded ${loadResult.channels.length} channel configurations`);
+            } else {
+                console.log('📋 No existing monitoring configurations found');
             }
-
-            console.log(`✅ Successfully restored ${monitoringInstances.size} monitoring instances`);
-        } else if (loadResult.error) {
-            console.error('❌ Failed to load monitoring data:', loadResult.error);
         } else {
-            console.log('📋 No existing monitoring configurations found');
+            console.error('❌ Database connection failed:', dbTest.error);
+            console.log('⚠️ Running without database - monitoring will not persist');
         }
+        
+        console.log('✅ Vercel serverless initialization complete');
+        console.log(`📊 Loaded configurations: ${Object.keys(monitoringConfigs).length}`);
+        
+    } catch (error) {
+        console.error('❌ Failed to initialize for Vercel:', error);
     }
-
-    // Start the server
-    app.listen(PORT, () => {
-        console.log('🚀 YouTube Monitor Pro API Started!');
-        console.log('─'.repeat(80));
-        console.log(`📍 Server: http://localhost:${PORT}`);
-        console.log(`🔗 API: http://localhost:${PORT}/api/live-link?channel=@channelname&type=live`);
-        console.log(`💚 Health: http://localhost:${PORT}/health`);
-        console.log(`📊 API Info: http://localhost:${PORT}/api/info`);
-        console.log(`🔍 Monitoring: http://localhost:${PORT}/api/monitoring/status`);
-        console.log(`⚙️  Setup: http://localhost:${PORT}/api/monitoring/setup`);
-        console.log('─'.repeat(80));
-        console.log('🔧 Configuration:');
-        console.log(`   YouTube API: ${process.env.YOUTUBE_API_KEY ? '✅ Configured' : '⚠️  Using fallback'}`);
-        console.log(`   Supabase: ${process.env.SUPABASE_URL ? '✅ Connected' : '❌ Not configured'}`);
-        console.log(`   Linktw API: ${process.env.LINKTW_API_KEY ? '✅ Configured' : '⚠️  Not configured'}`);
-        console.log(`   Cache Duration: ${CACHE_DURATION / 1000}s`);
-        console.log(`   Default Monitor Interval: ${DEFAULT_MONITOR_INTERVAL / 1000}s`);
-        console.log(`   Persistent Storage: ✅ Database (Supabase)`);
-        console.log('─'.repeat(80));
-
-        const activeMonitors = Array.from(monitoringInstances.values()).filter(i => i.isMonitoring);
-        console.log(`📡 Monitoring Status:`);
-        console.log(`   Active Channels: ${activeMonitors.length}`);
-        console.log(`   Configured Channels: ${persistentChannels.size}`);
-
-        if (activeMonitors.length > 0) {
-            console.log(`   Monitored Channels:`);
-            activeMonitors.forEach(instance => {
-                console.log(`     - ${instance.channelHandle} (${instance.contentTypes.join(', ')})`);
-            });
-        }
-
-        console.log('─'.repeat(80));
-        console.log('Ready for persistent database monitoring! 🎬📹🎭');
-        console.log('💡 Use the setup endpoint to configure one-time auto-monitoring');
-    });
 }
+
+// Initialize immediately when module loads
+initializeForVercel();
+
+// ✅ FIXED: Export for Vercel (remove app.listen())
+export default app;
 
 // Replace your initializeServer() call with:
 initializeServer().catch(error => {
@@ -2122,5 +2091,6 @@ initializeServer().catch(error => {
 });
 
 export default app;
+
 
 

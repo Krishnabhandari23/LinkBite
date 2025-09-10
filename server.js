@@ -1251,6 +1251,271 @@ app.get('/api/live-link', async (req, res) => {
 });
 
 // Auto-setup monitoring endpoint (one-time setup)
+// /api/monitoring/health-check endpoint
+app.get('/api/monitoring/health-check', async (req, res) => {
+    try {
+        console.log('🔍 Health check requested');
+        
+        // Get current system status
+        const healthData = {
+            success: true,
+            timestamp: new Date().toISOString(),
+            serverUptime: Math.floor(process.uptime()),
+            failedChannels: [],
+            healthyChannels: [],
+            totalChannels: 0,
+            activeChannels: 0,
+            errors: [],
+            warnings: []
+        };
+
+        // Check all configured channels
+        const configuredChannels = Object.keys(monitoringConfigs || {});
+        healthData.totalChannels = configuredChannels.length;
+
+        for (const channelHandle of configuredChannels) {
+            const config = monitoringConfigs[channelHandle];
+            const status = monitoringStatus[channelHandle];
+            
+            // Check if channel should be running but isn't
+            const shouldBeRunning = config && config.webhookUrl && config.contentTypes && config.contentTypes.length > 0;
+            const isCurrentlyRunning = activeMonitors.has(channelHandle);
+            const hasConsecutiveErrors = status && status.consecutiveErrors > 5;
+            const lastCheckTooOld = status && status.lastChecked && (Date.now() - new Date(status.lastChecked).getTime()) > (config.interval * 3 * 1000); // 3x interval threshold
+            
+            if (shouldBeRunning) {
+                healthData.activeChannels++;
+                
+                // Identify failed channels that need recovery
+                if (!isCurrentlyRunning || hasConsecutiveErrors || lastCheckTooOld) {
+                    const failureReasons = [];
+                    
+                    if (!isCurrentlyRunning) {
+                        failureReasons.push('not_running');
+                    }
+                    if (hasConsecutiveErrors) {
+                        failureReasons.push(`consecutive_errors_${status.consecutiveErrors}`);
+                    }
+                    if (lastCheckTooOld) {
+                        failureReasons.push('stale_check');
+                    }
+                    
+                    healthData.failedChannels.push({
+                        handle: channelHandle,
+                        channelUrl: config.channelUrl,
+                        reasons: failureReasons,
+                        lastChecked: status?.lastChecked || null,
+                        consecutiveErrors: status?.consecutiveErrors || 0,
+                        isRunning: isCurrentlyRunning,
+                        interval: config.interval,
+                        contentTypes: config.contentTypes
+                    });
+                    
+                    console.log(`⚠️ Failed channel detected: ${channelHandle} - Reasons: ${failureReasons.join(', ')}`);
+                } else {
+                    // Healthy channel
+                    healthData.healthyChannels.push({
+                        handle: channelHandle,
+                        lastChecked: status?.lastChecked || null,
+                        uptime: status?.uptime || 0,
+                        consecutiveErrors: status?.consecutiveErrors || 0
+                    });
+                }
+            }
+        }
+
+        // Additional health checks
+        
+        // Check memory usage
+        const memUsage = process.memoryUsage();
+        const memUsageMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+        if (memUsageMB > 500) { // 500MB threshold
+            healthData.warnings.push({
+                type: 'high_memory_usage',
+                message: `High memory usage: ${memUsageMB}MB`,
+                value: memUsageMB
+            });
+        }
+
+        // Check if any monitors are stuck
+        const now = Date.now();
+        for (const [channelHandle, monitor] of activeMonitors.entries()) {
+            const status = monitoringStatus[channelHandle];
+            if (status && status.lastChecked) {
+                const timeSinceLastCheck = now - new Date(status.lastChecked).getTime();
+                const config = monitoringConfigs[channelHandle];
+                const expectedInterval = (config?.interval || 60) * 1000;
+                
+                if (timeSinceLastCheck > expectedInterval * 5) { // 5x interval = stuck
+                    healthData.warnings.push({
+                        type: 'stuck_monitor',
+                        message: `Monitor appears stuck: ${channelHandle}`,
+                        channelHandle: channelHandle,
+                        timeSinceLastCheck: Math.round(timeSinceLastCheck / 1000)
+                    });
+                }
+            }
+        }
+
+        // Check system resources
+        const cpuUsage = process.cpuUsage();
+        healthData.systemInfo = {
+            memoryUsage: {
+                heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024),
+                heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024),
+                external: Math.round(memUsage.external / 1024 / 1024)
+            },
+            uptime: Math.floor(process.uptime()),
+            activeMonitors: activeMonitors.size,
+            configuredChannels: configuredChannels.length
+        };
+
+        // Log health summary
+        console.log(`📊 Health Check Summary:
+        - Total Channels: ${healthData.totalChannels}
+        - Active Monitors: ${activeMonitors.size}
+        - Failed Channels: ${healthData.failedChannels.length}
+        - Healthy Channels: ${healthData.healthyChannels.length}
+        - Warnings: ${healthData.warnings.length}
+        - Memory Usage: ${memUsageMB}MB`);
+
+        res.json(healthData);
+
+    } catch (error) {
+        console.error('❌ Health check error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Health check failed',
+            message: error.message,
+            timestamp: new Date().toISOString(),
+            failedChannels: [] // Always return empty array on error to prevent auto-recovery issues
+        });
+    }
+});
+
+// Additional helper endpoint for detailed health information
+app.get('/api/monitoring/health-detailed', async (req, res) => {
+    try {
+        const detailedHealth = {
+            success: true,
+            timestamp: new Date().toISOString(),
+            server: {
+                uptime: Math.floor(process.uptime()),
+                memory: process.memoryUsage(),
+                cpu: process.cpuUsage(),
+                version: process.version,
+                platform: process.platform
+            },
+            monitoring: {
+                totalConfigurations: Object.keys(monitoringConfigs || {}).length,
+                activeMonitors: activeMonitors.size,
+                totalChecks: Object.values(monitoringStatus || {}).reduce((total, status) => total + (status.totalChecks || 0), 0),
+                totalErrors: Object.values(monitoringStatus || {}).reduce((total, status) => total + (status.totalErrors || 0), 0)
+            },
+            channels: []
+        };
+
+        // Detailed channel information
+        for (const [channelHandle, config] of Object.entries(monitoringConfigs || {})) {
+            const status = monitoringStatus[channelHandle];
+            const isActive = activeMonitors.has(channelHandle);
+            
+            detailedHealth.channels.push({
+                handle: channelHandle,
+                channelUrl: config.channelUrl,
+                isActive: isActive,
+                interval: config.interval,
+                contentTypes: config.contentTypes,
+                webhookConfigured: !!config.webhookUrl,
+                status: status ? {
+                    lastChecked: status.lastChecked,
+                    consecutiveErrors: status.consecutiveErrors,
+                    totalChecks: status.totalChecks || 0,
+                    totalErrors: status.totalErrors || 0,
+                    uptime: status.uptime || 0,
+                    lastKnownLiveStatus: status.lastKnownLiveStatus
+                } : null
+            });
+        }
+
+        res.json(detailedHealth);
+
+    } catch (error) {
+        console.error('❌ Detailed health check error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Detailed health check failed',
+            message: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
+// Endpoint to manually trigger recovery for specific channel
+app.post('/api/monitoring/recover', async (req, res) => {
+    try {
+        const { channel, force = false } = req.body;
+        
+        if (!channel) {
+            return res.status(400).json({
+                success: false,
+                error: 'Channel handle is required'
+            });
+        }
+
+        const config = monitoringConfigs[channel];
+        if (!config) {
+            return res.status(404).json({
+                success: false,
+                error: 'Channel configuration not found'
+            });
+        }
+
+        const isCurrentlyRunning = activeMonitors.has(channel);
+        const status = monitoringStatus[channel];
+        
+        console.log(`🔧 Manual recovery triggered for ${channel} (Force: ${force})`);
+
+        // Stop existing monitor if running
+        if (isCurrentlyRunning) {
+            console.log(`🛑 Stopping existing monitor for ${channel}`);
+            clearInterval(activeMonitors.get(channel));
+            activeMonitors.delete(channel);
+        }
+
+        // Reset error count
+        if (status) {
+            status.consecutiveErrors = 0;
+            status.lastRecovery = new Date().toISOString();
+        }
+
+        // Restart monitoring
+        const result = await startChannelMonitoring(channel, config);
+        
+        if (result.success) {
+            console.log(`✅ Successfully recovered monitoring for ${channel}`);
+            res.json({
+                success: true,
+                message: `Recovery successful for ${channel}`,
+                channel: channel,
+                wasRunning: isCurrentlyRunning,
+                timestamp: new Date().toISOString()
+            });
+        } else {
+            throw new Error(result.error || 'Recovery failed');
+        }
+
+    } catch (error) {
+        console.error(`❌ Recovery failed for ${req.body.channel}:`, error);
+        res.status(500).json({
+            success: false,
+            error: 'Recovery operation failed',
+            message: error.message,
+            channel: req.body.channel,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
 
 // CRITICAL FIX: Replace your /api/monitoring/setup endpoint with this version
 
@@ -1857,4 +2122,5 @@ initializeServer().catch(error => {
 });
 
 export default app;
+
 

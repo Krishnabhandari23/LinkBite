@@ -2084,13 +2084,8 @@ initializeForVercel();
 // ✅ FIXED: Export for Vercel (remove app.listen())
 export default app;
 
-// Replace your initializeServer() call with:
-initializeServer().catch(error => {
-    console.error('❌ Failed to initialize server:', error);
-    process.exit(1);
-});
 
-export default app;
+
 
 
 
